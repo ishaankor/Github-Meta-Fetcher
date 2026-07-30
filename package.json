@@ -4,7 +4,6 @@
   "description": "Standalone Vercel Serverless Backend API for live GitHub profile, repository, and commit data streaming",
   "main": "api/github.js",
   "scripts": {
-    "build": "echo 'Serverless API ready'",
     "dev": "vercel dev",
     "start": "node api/index.js"
   },
