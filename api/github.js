@@ -1,6 +1,6 @@
 let memoryCache = null;
 let lastFetchTime = 0;
-const CACHE_DURATION_MS = 60 * 1000; // 1 minute in-memory cache for live commit streaming
+const CACHE_DURATION_MS = 10 * 1000; // 10-second fast cache to guarantee instant live updates without rate-limiting
 
 function formatTimeAgo(dateString) {
   const date = new Date(dateString);
@@ -18,7 +18,8 @@ function formatTimeAgo(dateString) {
 }
 
 export default async function handler(req, res) {
-  // Set CORS headers for all responses
+  // Always prevent Edge CDN stale caching for real-time live data
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
@@ -27,7 +28,6 @@ export default async function handler(req, res) {
     'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization'
   );
 
-  // Handle preflight CORS request
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
@@ -36,10 +36,20 @@ export default async function handler(req, res) {
   const username = process.env.GITHUB_USERNAME?.trim() || 'ishaankor';
   const now = Date.now();
 
-  // Serve 1-minute server in-memory cache if fresh
+  // Fast 10-second memory cache check
   if (memoryCache && now - lastFetchTime < CACHE_DURATION_MS) {
-    res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=30');
-    return res.status(200).json({ ...memoryCache, cached: true });
+    // Recalculate timeAgo dynamically on cached commits
+    const updatedCommits = memoryCache.commits.map((c) => ({
+      ...c,
+      timeAgo: formatTimeAgo(c.date),
+    }));
+
+    return res.status(200).json({
+      ...memoryCache,
+      commits: updatedCommits,
+      cached: true,
+      servedAt: new Date().toISOString(),
+    });
   }
 
   const token = process.env.GITHUB_TOKEN?.trim();
@@ -54,8 +64,8 @@ export default async function handler(req, res) {
 
   try {
     const [userRes, reposRes] = await Promise.all([
-      fetch(`https://api.github.com/users/${username}`, { headers }),
-      fetch(`https://api.github.com/users/${username}/repos?per_page=100&sort=pushed`, { headers }),
+      fetch(`https://api.github.com/users/${username}`, { headers, cache: 'no-store' }),
+      fetch(`https://api.github.com/users/${username}/repos?per_page=100&sort=pushed`, { headers, cache: 'no-store' }),
     ]);
 
     let userData = null;
@@ -93,7 +103,7 @@ export default async function handler(req, res) {
       userData.public_repos = reposData.length;
     }
 
-    // Query top 5 active repos to retrieve the 5 most recent commits
+    // Query top 5 active repos to retrieve live recent commits
     let commitsData = [];
     if (Array.isArray(reposData) && reposData.length > 0) {
       const topPushed = [...reposData]
@@ -104,7 +114,7 @@ export default async function handler(req, res) {
         try {
           const resCommit = await fetch(
             `https://api.github.com/repos/${username}/${repo.name}/commits?per_page=5`,
-            { headers }
+            { headers, cache: 'no-store' }
           );
           if (resCommit.ok) {
             const data = await resCommit.json();
@@ -154,7 +164,6 @@ export default async function handler(req, res) {
     };
     lastFetchTime = now;
 
-    res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=30');
     return res.status(200).json({ ...memoryCache, cached: false });
   } catch (error) {
     console.error('Vercel GitHub Meta Fetcher Handler Error:', error);
