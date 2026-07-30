@@ -1,6 +1,6 @@
 let memoryCache = null;
 let lastFetchTime = 0;
-const CACHE_DURATION_MS = 60 * 1000; // 1-minute server in-memory cache for live commit history updates
+const CACHE_DURATION_MS = 60 * 1000;
 
 function formatTimeAgo(dateString) {
   const date = new Date(dateString);
@@ -60,7 +60,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Primary repos URL: if authenticated, use /user/repos to include private repos if token has repo scope
     const reposUrl = token
       ? `https://api.github.com/user/repos?per_page=100&sort=pushed&type=all`
       : `https://api.github.com/users/${username}/repos?per_page=100&sort=pushed`;
@@ -74,6 +73,49 @@ export default async function handler(req, res) {
     let userData = null;
     let reposData = [];
     let commitsData = [];
+    let contributionCalendar = null;
+
+    if (token) {
+      try {
+        const graphqlQuery = {
+          query: `
+            query {
+              user(login: "${username}") {
+                contributionsCollection {
+                  contributionCalendar {
+                    totalContributions
+                    weeks {
+                      contributionDays {
+                        date
+                        contributionCount
+                        color
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          `,
+        };
+
+        const gqlRes = await fetch('https://api.github.com/graphql', {
+          method: 'POST',
+          headers: {
+            ...headers,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(graphqlQuery),
+          cache: 'no-store',
+        });
+
+        if (gqlRes.ok) {
+          const gqlJson = await gqlRes.json();
+          contributionCalendar = gqlJson.data?.user?.contributionsCollection?.contributionCalendar || null;
+        }
+      } catch (gqlErr) {
+        console.error('GraphQL Contribution Calendar Fetch Error:', gqlErr);
+      }
+    }
 
     if (userRes.ok) {
       const u = await userRes.json();
@@ -103,10 +145,6 @@ export default async function handler(req, res) {
             updated_at: r.updated_at,
           }));
       }
-    }
-
-    if (userData && reposData.length > 0) {
-      userData.public_repos = reposData.length;
     }
 
     // 1. Primary: Parse live PushEvents from GitHub Events API
@@ -203,6 +241,7 @@ export default async function handler(req, res) {
       user: userData,
       repos: reposData,
       commits: commitsData,
+      contributionCalendar,
       totalRepos: reposData.length,
       fetchedAt: new Date().toISOString(),
     };
