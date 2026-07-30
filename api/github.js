@@ -1,6 +1,6 @@
 let memoryCache = null;
 let lastFetchTime = 0;
-const CACHE_DURATION_MS = 60 * 1000;
+const CACHE_DURATION_MS = 60 * 1000; // 1-minute server in-memory cache for live commit history updates
 
 function formatTimeAgo(dateString) {
   const date = new Date(dateString);
@@ -18,6 +18,7 @@ function formatTimeAgo(dateString) {
 }
 
 export default async function handler(req, res) {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
@@ -35,8 +36,17 @@ export default async function handler(req, res) {
   const now = Date.now();
 
   if (memoryCache && now - lastFetchTime < CACHE_DURATION_MS) {
-    res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=30');
-    return res.status(200).json({ ...memoryCache, cached: true });
+    const updatedCommits = memoryCache.commits.map((c) => ({
+      ...c,
+      timeAgo: formatTimeAgo(c.date),
+    }));
+
+    return res.status(200).json({
+      ...memoryCache,
+      commits: updatedCommits,
+      cached: true,
+      servedAt: new Date().toISOString(),
+    });
   }
 
   const token = process.env.GITHUB_TOKEN?.trim();
@@ -50,13 +60,20 @@ export default async function handler(req, res) {
   }
 
   try {
-    const [userRes, reposRes] = await Promise.all([
-      fetch(`https://api.github.com/users/${username}`, { headers }),
-      fetch(`https://api.github.com/users/${username}/repos?per_page=100&sort=pushed`, { headers }),
+    // Primary repos URL: if authenticated, use /user/repos to include private repos if token has repo scope
+    const reposUrl = token
+      ? `https://api.github.com/user/repos?per_page=100&sort=pushed&type=all`
+      : `https://api.github.com/users/${username}/repos?per_page=100&sort=pushed`;
+
+    const [userRes, reposRes, eventsRes] = await Promise.all([
+      fetch(`https://api.github.com/users/${username}`, { headers, cache: 'no-store' }),
+      fetch(reposUrl, { headers, cache: 'no-store' }),
+      fetch(`https://api.github.com/users/${username}/events?per_page=30`, { headers, cache: 'no-store' }),
     ]);
 
     let userData = null;
     let reposData = [];
+    let commitsData = [];
 
     if (userRes.ok) {
       const u = await userRes.json();
@@ -74,15 +91,17 @@ export default async function handler(req, res) {
     if (reposRes.ok) {
       const fetchedRepos = await reposRes.json();
       if (Array.isArray(fetchedRepos) && fetchedRepos.length > 0) {
-        reposData = fetchedRepos.map((r) => ({
-          id: r.id,
-          name: r.name,
-          language: r.language,
-          html_url: r.html_url,
-          description: r.description,
-          pushed_at: r.pushed_at,
-          updated_at: r.updated_at,
-        }));
+        reposData = fetchedRepos
+          .filter((r) => !r.fork && (r.owner?.login === username || r.owner?.login === undefined))
+          .map((r) => ({
+            id: r.id,
+            name: r.name,
+            language: r.language,
+            html_url: r.html_url,
+            description: r.description,
+            pushed_at: r.pushed_at,
+            updated_at: r.updated_at,
+          }));
       }
     }
 
@@ -90,8 +109,47 @@ export default async function handler(req, res) {
       userData.public_repos = reposData.length;
     }
 
-    let commitsData = [];
-    if (Array.isArray(reposData) && reposData.length > 0) {
+    // 1. Primary: Parse live PushEvents from GitHub Events API
+    if (eventsRes.ok) {
+      const events = await eventsRes.json();
+      if (Array.isArray(events)) {
+        const pushEvents = events.filter((e) => e.type === 'PushEvent');
+        const eventCommits = [];
+
+        pushEvents.forEach((ev) => {
+          const repoFullName = ev.repo?.name || '';
+          const repoShortName = repoFullName.split('/')[1] || repoFullName;
+          const repoUrl = `https://github.com/${repoFullName}`;
+          const payloadCommits = ev.payload?.commits || [];
+
+          payloadCommits.forEach((c) => {
+            const sha = c.sha;
+            const shortSha = sha ? sha.substring(0, 7) : 'head';
+            eventCommits.push({
+              sha,
+              shortSha,
+              message: c.message?.split('\n')[0] || 'Update repository',
+              repoName: repoShortName,
+              repoUrl,
+              commitUrl: `https://github.com/${repoFullName}/commit/${sha}`,
+              date: ev.created_at,
+              timeAgo: formatTimeAgo(ev.created_at),
+            });
+          });
+        });
+
+        if (eventCommits.length > 0) {
+          const commitMap = new Map();
+          eventCommits.forEach((item) => commitMap.set(item.sha, item));
+          commitsData = Array.from(commitMap.values())
+            .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+            .slice(0, 5);
+        }
+      }
+    }
+
+    // 2. Fallback: Query individual repository commit endpoints
+    if (commitsData.length === 0 && Array.isArray(reposData) && reposData.length > 0) {
       const topPushed = [...reposData]
         .sort((a, b) => new Date(b.pushed_at).getTime() - new Date(a.pushed_at).getTime())
         .slice(0, 5);
@@ -100,7 +158,7 @@ export default async function handler(req, res) {
         try {
           const resCommit = await fetch(
             `https://api.github.com/repos/${username}/${repo.name}/commits?per_page=5`,
-            { headers }
+            { headers, cache: 'no-store' }
           );
           if (resCommit.ok) {
             const data = await resCommit.json();
@@ -150,7 +208,6 @@ export default async function handler(req, res) {
     };
     lastFetchTime = now;
 
-    res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=30');
     return res.status(200).json({ ...memoryCache, cached: false });
   } catch (error) {
     console.error('Vercel GitHub Meta Fetcher Handler Error:', error);
