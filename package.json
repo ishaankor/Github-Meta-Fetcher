@@ -1,0 +1,20 @@
+{
+  "name": "github-meta-fetcher",
+  "version": "1.0.0",
+  "description": "Standalone Vercel Serverless Backend API for live GitHub profile, repository, and commit data streaming",
+  "main": "api/github.js",
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "node api/index.js"
+  },
+  "keywords": [
+    "github",
+    "api",
+    "proxy",
+    "vercel",
+    "serverless",
+    "cors"
+  ],
+  "author": "Ishaan Koradia (@ishaankor)",
+  "license": "MIT"
+}
