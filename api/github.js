@@ -161,6 +161,16 @@ export default async function handler(req, res) {
           const payloadCommits = ev.payload?.commits || [];
 
           payloadCommits.forEach((c) => {
+            const authorName = (c.author?.name || ev.actor?.login || '').toLowerCase();
+            const authorEmail = (c.author?.email || '').toLowerCase();
+            const msg = (c.message || '').toLowerCase();
+
+            // Strictly filter out bot commits, workflow runs, and loc.csv maintenance commits
+            const isBot = authorName.includes('bot') || authorName.includes('action') || authorEmail.includes('bot') || authorEmail.includes('action');
+            const isWorkflowMsg = msg.includes('loc.csv') || msg.includes('[skip ci]') || msg.includes('auto-update');
+
+            if (isBot || isWorkflowMsg) return;
+
             const sha = c.sha;
             const shortSha = sha ? sha.substring(0, 7) : 'head';
             eventCommits.push({
@@ -186,7 +196,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 2. Fallback: Query individual repository commit endpoints
+    // 2. Fallback: Query individual repository commit endpoints filtered by user author
     if (commitsData.length === 0 && Array.isArray(reposData) && reposData.length > 0) {
       const topPushed = [...reposData]
         .sort((a, b) => new Date(b.pushed_at).getTime() - new Date(a.pushed_at).getTime())
@@ -195,25 +205,34 @@ export default async function handler(req, res) {
       const commitPromises = topPushed.map(async (repo) => {
         try {
           const resCommit = await fetch(
-            `https://api.github.com/repos/${username}/${repo.name}/commits?per_page=5`,
+            `https://api.github.com/repos/${username}/${repo.name}/commits?author=${username}&per_page=10`,
             { headers, cache: 'no-store' }
           );
           if (resCommit.ok) {
             const data = await resCommit.json();
             if (Array.isArray(data)) {
-              return data.map((c) => {
-                const commitDate = c.commit?.committer?.date || c.commit?.author?.date || repo.pushed_at;
-                return {
-                  sha: c.sha,
-                  shortSha: c.sha.substring(0, 7),
-                  message: c.commit?.message?.split('\n')[0] || 'Update repository',
-                  repoName: repo.name,
-                  repoUrl: repo.html_url,
-                  commitUrl: c.html_url || `${repo.html_url}/commit/${c.sha}`,
-                  date: commitDate,
-                  timeAgo: formatTimeAgo(commitDate),
-                };
-              });
+              return data
+                .filter((c) => {
+                  const authorName = (c.commit?.author?.name || c.author?.login || '').toLowerCase();
+                  const authorEmail = (c.commit?.author?.email || '').toLowerCase();
+                  const msg = (c.commit?.message || '').toLowerCase();
+                  const isBot = authorName.includes('bot') || authorName.includes('action') || authorEmail.includes('bot') || authorEmail.includes('action');
+                  const isWorkflowMsg = msg.includes('loc.csv') || msg.includes('[skip ci]') || msg.includes('auto-update');
+                  return !isBot && !isWorkflowMsg;
+                })
+                .map((c) => {
+                  const commitDate = c.commit?.committer?.date || c.commit?.author?.date || repo.pushed_at;
+                  return {
+                    sha: c.sha,
+                    shortSha: c.sha.substring(0, 7),
+                    message: c.commit?.message?.split('\n')[0] || 'Update repository',
+                    repoName: repo.name,
+                    repoUrl: repo.html_url,
+                    commitUrl: c.html_url || `${repo.html_url}/commit/${c.sha}`,
+                    date: commitDate,
+                    timeAgo: formatTimeAgo(commitDate),
+                  };
+                });
             }
           }
         } catch (e) {
