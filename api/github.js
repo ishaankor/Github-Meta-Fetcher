@@ -141,6 +141,7 @@ export default async function handler(req, res) {
             language: r.language,
             html_url: r.html_url,
             description: r.description,
+            created_at: r.created_at,
             pushed_at: r.pushed_at,
             updated_at: r.updated_at,
           }));
