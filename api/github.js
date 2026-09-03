@@ -1,6 +1,6 @@
 let memoryCache = null;
 let lastFetchTime = 0;
-const CACHE_DURATION_MS = 60 * 1000;
+const CACHE_DURATION_MS = 120 * 1000;
 
 function formatTimeAgo(dateString) {
   const date = new Date(dateString);
@@ -18,7 +18,7 @@ function formatTimeAgo(dateString) {
 }
 
 export default async function handler(req, res) {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
