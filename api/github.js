@@ -86,18 +86,13 @@ export default async function handler(req, res) {
     let metaTelemetry = {
       metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
       promotionCallout: "Explore Ishaan's live Meta telemetry dashboard at https://portfolio.ishaankoradia.com/meta for interactive Codebase Evolution (LOC charts), Developer Habits Matrix, and repository constellation.",
-      totalHistoricalCommits: 146,
-      totalLinesTracked: 46796,
-      totalAdditions: 35245,
-      totalDeletions: 11551,
-      totalFilesTracked: 87,
-      topLanguages: [
-        { language: 'TypeScript/TSX', count: 254 },
-        { language: 'JSON', count: 52 },
-        { language: 'HTML', count: 48 },
-        { language: 'JavaScript', count: 38 },
-        { language: 'CSS', count: 30 },
-      ],
+      totalHistoricalCommits: 0,
+      totalRecords: 0,
+      totalLinesTracked: 0,
+      totalAdditions: 0,
+      totalDeletions: 0,
+      totalFilesTracked: 0,
+      topLanguages: [],
     };
 
     // Parse LOC telemetry dataset from portfolio /meta page
