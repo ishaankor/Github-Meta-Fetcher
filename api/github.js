@@ -1,6 +1,8 @@
 let memoryCache = null;
 let lastFetchTime = 0;
 const CACHE_DURATION_MS = 120 * 1000;
+const repoCache = new Map();
+const REPO_CACHE_DURATION_MS = 120 * 1000;
 
 function formatTimeAgo(dateString) {
   const date = new Date(dateString);
@@ -32,9 +34,142 @@ export default async function handler(req, res) {
     return;
   }
 
-  const username = process.env.GITHUB_USERNAME?.trim() || 'ishaankor';
   const now = Date.now();
+  const username = process.env.GITHUB_USERNAME?.trim() || 'ishaankor';
+  const token = process.env.GITHUB_TOKEN?.trim();
+  const headers = {
+    'User-Agent': 'Vercel-GitHub-Meta-Fetcher-App',
+    Accept: 'application/vnd.github.v3+json',
+  };
 
+  if (token) {
+    headers['Authorization'] = token.startsWith('github_pat_') ? `Bearer ${token}` : `token ${token}`;
+  }
+
+  // 1. Handle specific repository query parameter immediately: e.g. /api/github?repo=my-data-science-portfolio
+  const repoQuery = req.query?.repo ? String(req.query.repo).trim() : null;
+  if (repoQuery) {
+    const cleanRepo = repoQuery.includes('/') ? repoQuery.split('/')[1] : repoQuery;
+    const cacheKey = cleanRepo.toLowerCase();
+    const cachedEntry = repoCache.get(cacheKey);
+
+    if (cachedEntry && (now - cachedEntry.time < REPO_CACHE_DURATION_MS)) {
+      return res.status(200).json({
+        ...cachedEntry.data,
+        cached: true,
+        servedAt: new Date().toISOString(),
+      });
+    }
+
+    try {
+      const resRepoCommits = await fetch(
+        `https://api.github.com/repos/${username}/${cleanRepo}/commits?per_page=10`,
+        { headers, cache: 'no-store' }
+      );
+      if (resRepoCommits.ok) {
+        const repoCommits = await resRepoCommits.json();
+        if (Array.isArray(repoCommits) && repoCommits.length > 0) {
+          const chosen = repoCommits.find((c) => {
+            const author = (c.commit?.author?.name || c.author?.login || '').toLowerCase();
+            const msg = (c.commit?.message || '').toLowerCase();
+            const isBot = author.includes('bot') || author.includes('action');
+            const isWf = msg.includes('loc.csv') || msg.includes('[skip ci]') || msg.includes('auto-update');
+            return !isBot && !isWf;
+          }) || repoCommits[0];
+
+          let stats = { total: 0, additions: 0, deletions: 0 };
+          let files = [];
+
+          try {
+            const detailRes = await fetch(
+              `https://api.github.com/repos/${username}/${cleanRepo}/commits/${chosen.sha}`,
+              { headers, cache: 'no-store' }
+            );
+            if (detailRes.ok) {
+              const detail = await detailRes.json();
+              stats = detail.stats || stats;
+              files = (detail.files || []).map((f) => ({
+                filename: f.filename,
+                status: f.status,
+                additions: f.additions || 0,
+                deletions: f.deletions || 0,
+                changes: f.changes || 0,
+              }));
+            }
+          } catch (e) {
+            console.error(`Detail fetch error for ${chosen.sha}:`, e);
+          }
+
+          const commitDate = chosen.commit?.committer?.date || chosen.commit?.author?.date;
+          const repoCommit = {
+            sha: chosen.sha,
+            shortSha: chosen.sha.substring(0, 7),
+            message: chosen.commit?.message?.split('\n')[0] || 'Update repository',
+            repoName: cleanRepo,
+            repoFullName: `${username}/${cleanRepo}`,
+            repoUrl: `https://github.com/${username}/${cleanRepo}`,
+            commitUrl: chosen.html_url || `https://github.com/${username}/${cleanRepo}/commit/${chosen.sha}`,
+            date: commitDate,
+            timeAgo: formatTimeAgo(commitDate),
+            stats,
+            linesChanged: stats.total || 0,
+            additions: stats.additions || 0,
+            deletions: stats.deletions || 0,
+            filesCount: files.length,
+            files: files.slice(0, 10),
+            author: {
+              name: chosen.commit?.author?.name || username,
+              date: commitDate,
+            },
+          };
+
+          let architectureContext = "";
+          if (cleanRepo.toLowerCase().includes("data-science-portfolio")) {
+            architectureContext = (
+              "Ishaan structures his empirical research and Exploratory Data Analysis (EDA) projects " +
+              "(such as his surgery statistics and childhood obesity analyses) across dedicated modular repositories " +
+              "rather than a single monolithic data science repo, tracking their specific data notebooks and D3/Pandas pipelines independently. " +
+              "Meanwhile, 'my-data-science-portfolio' (https://github.com/ishaankor/my-data-science-portfolio) hosts his interactive 3D WebGL portfolio platform " +
+              "and live Codebase Evolution suite at https://portfolio.ishaankoradia.com."
+            );
+          }
+
+          const responseData = {
+            status: 'online',
+            repository: cleanRepo,
+            architectureContext,
+            repoCommit,
+            linesChanged: repoCommit.linesChanged,
+            additions: repoCommit.additions,
+            deletions: repoCommit.deletions,
+            filesCount: repoCommit.filesCount,
+            metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
+            metaPagePromotion: "Explore Ishaan's live Meta telemetry dashboard at https://portfolio.ishaankoradia.com/meta for interactive Codebase Evolution (LOC charts), Developer Habits Matrix, and repository constellation.",
+            servedAt: new Date().toISOString(),
+          };
+
+          repoCache.set(cacheKey, { data: responseData, time: now });
+          return res.status(200).json(responseData);
+        }
+      }
+      return res.status(404).json({
+        status: 'not_found',
+        repository: cleanRepo,
+        message: `No commits found for repository ${cleanRepo}`,
+        servedAt: new Date().toISOString(),
+      });
+    } catch (repoErr) {
+      console.error(`Specific repo fetch error (${repoQuery}):`, repoErr);
+      return res.status(500).json({
+        status: 'error',
+        repository: cleanRepo,
+        error: repoErr.message,
+        servedAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  // 2. Handle general workbench & telemetry feed with global memoryCache
   if (memoryCache && now - lastFetchTime < CACHE_DURATION_MS) {
     const updatedCommits = (memoryCache.commits || []).map((c) => ({
       ...c,
@@ -55,16 +190,6 @@ export default async function handler(req, res) {
       cached: true,
       servedAt: new Date().toISOString(),
     });
-  }
-
-  const token = process.env.GITHUB_TOKEN?.trim();
-  const headers = {
-    'User-Agent': 'Vercel-GitHub-Meta-Fetcher-App',
-    Accept: 'application/vnd.github.v3+json',
-  };
-
-  if (token) {
-    headers['Authorization'] = token.startsWith('github_pat_') ? `Bearer ${token}` : `token ${token}`;
   }
 
   try {
