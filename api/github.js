@@ -36,14 +36,22 @@ export default async function handler(req, res) {
   const now = Date.now();
 
   if (memoryCache && now - lastFetchTime < CACHE_DURATION_MS) {
-    const updatedCommits = memoryCache.commits.map((c) => ({
+    const updatedCommits = (memoryCache.commits || []).map((c) => ({
       ...c,
       timeAgo: formatTimeAgo(c.date),
     }));
 
+    const updatedLatestCommit = memoryCache.latestCommit
+      ? {
+          ...memoryCache.latestCommit,
+          timeAgo: formatTimeAgo(memoryCache.latestCommit.date),
+        }
+      : updatedCommits[0] || null;
+
     return res.status(200).json({
       ...memoryCache,
       commits: updatedCommits,
+      latestCommit: updatedLatestCommit,
       cached: true,
       servedAt: new Date().toISOString(),
     });
@@ -64,16 +72,73 @@ export default async function handler(req, res) {
       ? `https://api.github.com/user/repos?per_page=100&sort=pushed&type=all`
       : `https://api.github.com/users/${username}/repos?per_page=100&sort=pushed`;
 
-    const [userRes, reposRes, eventsRes] = await Promise.all([
+    const [userRes, reposRes, eventsRes, locRes] = await Promise.all([
       fetch(`https://api.github.com/users/${username}`, { headers, cache: 'no-store' }),
       fetch(reposUrl, { headers, cache: 'no-store' }),
       fetch(`https://api.github.com/users/${username}/events?per_page=30`, { headers, cache: 'no-store' }),
+      fetch('https://raw.githubusercontent.com/ishaankor/my-data-science-portfolio/main/data/loc-static.json', { cache: 'no-store' }).catch(() => null),
     ]);
 
     let userData = null;
     let reposData = [];
     let commitsData = [];
     let contributionCalendar = null;
+    let metaTelemetry = {
+      metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
+      promotionCallout: "Explore Ishaan's live Meta telemetry dashboard at https://portfolio.ishaankoradia.com/meta for interactive Codebase Evolution (LOC charts), Developer Habits Matrix, and repository constellation.",
+      totalHistoricalCommits: 146,
+      totalLinesTracked: 46796,
+      totalAdditions: 35245,
+      totalDeletions: 11551,
+      totalFilesTracked: 87,
+      topLanguages: [
+        { language: 'TypeScript/TSX', count: 254 },
+        { language: 'JSON', count: 52 },
+        { language: 'HTML', count: 48 },
+        { language: 'JavaScript', count: 38 },
+        { language: 'CSS', count: 30 },
+      ],
+    };
+
+    // Parse LOC telemetry dataset from portfolio /meta page
+    if (locRes && locRes.ok) {
+      try {
+        const records = await locRes.json();
+        if (Array.isArray(records) && records.length > 0) {
+          const commitsSet = new Set();
+          const filesSet = new Set();
+          let additions = 0;
+          let deletions = 0;
+          const langMap = {};
+
+          records.forEach((r) => {
+            if (r.commit) commitsSet.add(r.commit);
+            if (r.added) additions += r.added;
+            if (r.deleted) deletions += r.deleted;
+            if (r.file) filesSet.add(r.file);
+            if (r.type) langMap[r.type] = (langMap[r.type] || 0) + 1;
+          });
+
+          const topLangs = Object.entries(langMap)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 6)
+            .map(([language, count]) => ({ language, count }));
+
+          metaTelemetry = {
+            ...metaTelemetry,
+            totalHistoricalCommits: commitsSet.size,
+            totalRecords: records.length,
+            totalLinesTracked: additions + deletions,
+            totalAdditions: additions,
+            totalDeletions: deletions,
+            totalFilesTracked: filesSet.size,
+            topLanguages: topLangs,
+          };
+        }
+      } catch (locErr) {
+        console.warn('Meta LOC dataset parse warning:', locErr);
+      }
+    }
 
     if (token) {
       try {
@@ -179,6 +244,7 @@ export default async function handler(req, res) {
               shortSha,
               message: c.message?.split('\n')[0] || 'Update repository',
               repoName: repoShortName,
+              repoFullName,
               repoUrl,
               commitUrl: `https://github.com/${repoFullName}/commit/${sha}`,
               date: ev.created_at,
@@ -192,7 +258,7 @@ export default async function handler(req, res) {
           eventCommits.forEach((item) => commitMap.set(item.sha, item));
           commitsData = Array.from(commitMap.values())
             .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-            .slice(0, 5);
+            .slice(0, 8);
         }
       }
     }
@@ -228,6 +294,7 @@ export default async function handler(req, res) {
                     shortSha: c.sha.substring(0, 7),
                     message: c.commit?.message?.split('\n')[0] || 'Update repository',
                     repoName: repo.name,
+                    repoFullName: `${username}/${repo.name}`,
                     repoUrl: repo.html_url,
                     commitUrl: c.html_url || `${repo.html_url}/commit/${c.sha}`,
                     date: commitDate,
@@ -251,16 +318,78 @@ export default async function handler(req, res) {
 
         commitsData = Array.from(commitMap.values())
           .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-          .slice(0, 5);
+          .slice(0, 8);
       }
     }
+
+    // 3. Deep Commit Telemetry: Enrich recent commits with exact line diff stats and modified files
+    let enrichedCommits = [];
+    if (commitsData.length > 0) {
+      enrichedCommits = await Promise.all(
+        commitsData.slice(0, 6).map(async (commit) => {
+          try {
+            const targetRepo = commit.repoFullName || `${username}/${commit.repoName}`;
+            const commitDetailRes = await fetch(
+              `https://api.github.com/repos/${targetRepo}/commits/${commit.sha}`,
+              { headers, cache: 'no-store' }
+            );
+
+            if (commitDetailRes.ok) {
+              const detail = await commitDetailRes.json();
+              const stats = detail.stats || { total: 0, additions: 0, deletions: 0 };
+              const files = (detail.files || []).map((f) => ({
+                filename: f.filename,
+                status: f.status,
+                additions: f.additions || 0,
+                deletions: f.deletions || 0,
+                changes: f.changes || 0,
+              }));
+
+              return {
+                ...commit,
+                stats: {
+                  total: stats.total || 0,
+                  additions: stats.additions || 0,
+                  deletions: stats.deletions || 0,
+                },
+                linesChanged: stats.total || 0,
+                additions: stats.additions || 0,
+                deletions: stats.deletions || 0,
+                filesCount: files.length,
+                files: files.slice(0, 10),
+                author: {
+                  name: detail.commit?.author?.name || detail.author?.login || username,
+                  date: detail.commit?.author?.date || commit.date,
+                },
+              };
+            }
+          } catch (detailErr) {
+            console.error(`Failed to fetch commit detail for ${commit.sha}:`, detailErr);
+          }
+
+          return {
+            ...commit,
+            stats: { total: 0, additions: 0, deletions: 0 },
+            linesChanged: 0,
+            additions: 0,
+            deletions: 0,
+            filesCount: 0,
+            files: [],
+          };
+        })
+      );
+    }
+
+    const latestCommit = enrichedCommits.length > 0 ? enrichedCommits[0] : null;
 
     memoryCache = {
       status: 'online',
       username,
       user: userData,
       repos: reposData,
-      commits: commitsData,
+      commits: enrichedCommits,
+      latestCommit,
+      metaTelemetry,
       contributionCalendar,
       totalRepos: reposData.length,
       fetchedAt: new Date().toISOString(),
@@ -283,6 +412,11 @@ export default async function handler(req, res) {
       },
       repos: [],
       commits: [],
+      latestCommit: null,
+      metaTelemetry: {
+        metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
+        promotionCallout: "Explore Ishaan's live Meta telemetry dashboard at https://portfolio.ishaankoradia.com/meta",
+      },
       error: error.message,
     };
 
