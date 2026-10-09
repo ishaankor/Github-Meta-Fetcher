@@ -5,6 +5,8 @@ const repoCache = new Map();
 const REPO_CACHE_DURATION_MS = 120 * 1000;
 const dateCache = new Map();
 const DATE_CACHE_DURATION_MS = 120 * 1000;
+const timeframeRepoCache = new Map();
+const TIMEFRAME_REPO_CACHE_DURATION_MS = 120 * 1000;
 
 function formatTimeAgo(dateString) {
   const date = new Date(dateString);
@@ -19,6 +21,120 @@ function formatTimeAgo(dateString) {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset = '-07:00' }) {
+  const now = new Date();
+  let sinceDate = null;
+  let untilDate = null;
+  let resolvedLabel = timeframe || '';
+
+  // 1. Explicit 'since' timestamp or date string
+  if (since) {
+    const s = String(since).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      sinceDate = new Date(`${s}T00:00:00${tzOffset}`);
+    } else {
+      sinceDate = new Date(s);
+    }
+  }
+
+  // 2. Explicit 'until' timestamp or date string
+  if (until) {
+    const u = String(until).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(u)) {
+      untilDate = new Date(`${u}T23:59:59${tzOffset}`);
+    } else {
+      untilDate = new Date(u);
+    }
+  }
+
+  // 3. Explicit numeric days (e.g. days=14)
+  if (days) {
+    const numDays = parseInt(days, 10);
+    if (!isNaN(numDays) && numDays > 0) {
+      sinceDate = new Date(now.getTime() - numDays * 24 * 60 * 60 * 1000);
+      untilDate = untilDate || now;
+      resolvedLabel = resolvedLabel || `past ${numDays} days`;
+    }
+  }
+
+  // 4. Date range formatted with '..' (e.g. 2026-09-25..2026-10-09)
+  if (date && String(date).includes('..')) {
+    const [startStr, endStr] = String(date).split('..');
+    const s = startStr.trim();
+    const e = endStr.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      sinceDate = new Date(`${s}T00:00:00${tzOffset}`);
+    } else {
+      sinceDate = new Date(s);
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(e)) {
+      untilDate = new Date(`${e}T23:59:59${tzOffset}`);
+    } else {
+      untilDate = new Date(e);
+    }
+    resolvedLabel = resolvedLabel || `${s} to ${e}`;
+  }
+
+  // 5. Single date string in 'date' (e.g. 2026-10-06)
+  if (date && /^\d{4}-\d{2}-\d{2}$/.test(String(date).trim()) && !sinceDate) {
+    const d = String(date).trim();
+    sinceDate = new Date(`${d}T00:00:00${tzOffset}`);
+    untilDate = new Date(`${d}T23:59:59${tzOffset}`);
+    resolvedLabel = d;
+  }
+
+  // 6. Natural language relative timeframe strings
+  const tf = (timeframe || (date && !/^\d{4}-\d{2}-\d{2}$/.test(String(date)) && !String(date).includes('..') ? String(date) : '')).toLowerCase().trim();
+  if (tf && !sinceDate) {
+    if (tf.includes('two week') || tf.includes('2 week') || tf.includes('14 day') || tf.includes('fourteen day') || tf.includes('fortnight')) {
+      sinceDate = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+      untilDate = untilDate || now;
+      resolvedLabel = 'last two weeks';
+    } else if (tf.includes('three week') || tf.includes('3 week') || tf.includes('21 day')) {
+      sinceDate = new Date(now.getTime() - 21 * 24 * 60 * 60 * 1000);
+      untilDate = untilDate || now;
+      resolvedLabel = 'last 3 weeks';
+    } else if (tf.includes('last week') || tf.includes('one week') || tf.includes('1 week') || tf.includes('7 day') || tf.includes('past week') || tf.includes('seven day') || tf.includes('previous week')) {
+      sinceDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      untilDate = untilDate || now;
+      resolvedLabel = 'last week';
+    } else if (tf.includes('this week') || tf.includes('current week')) {
+      const startOfWeek = new Date(now);
+      const day = startOfWeek.getDay();
+      startOfWeek.setDate(startOfWeek.getDate() - day);
+      startOfWeek.setHours(0, 0, 0, 0);
+      sinceDate = startOfWeek;
+      untilDate = untilDate || now;
+      resolvedLabel = 'this week';
+    } else if (tf.includes('month') || tf.includes('30 day')) {
+      sinceDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      untilDate = untilDate || now;
+      resolvedLabel = 'past month';
+    } else if (tf.includes('today')) {
+      const startOfDay = new Date(now);
+      startOfDay.setHours(0, 0, 0, 0);
+      sinceDate = startOfDay;
+      untilDate = untilDate || now;
+      resolvedLabel = 'today';
+    } else if (tf.includes('yesterday')) {
+      const startOfYesterday = new Date(now);
+      startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+      startOfYesterday.setHours(0, 0, 0, 0);
+      const endOfYesterday = new Date(startOfYesterday);
+      endOfYesterday.setHours(23, 59, 59, 999);
+      sinceDate = startOfYesterday;
+      untilDate = endOfYesterday;
+      resolvedLabel = 'yesterday';
+    }
+  }
+
+  return {
+    sinceDate: sinceDate && !isNaN(sinceDate.getTime()) ? sinceDate.toISOString() : null,
+    untilDate: untilDate && !isNaN(untilDate.getTime()) ? untilDate.toISOString() : null,
+    resolvedLabel: resolvedLabel || 'specified timeframe'
+  };
 }
 
 export default async function handler(req, res) {
@@ -48,79 +164,85 @@ export default async function handler(req, res) {
     headers['Authorization'] = token.startsWith('github_pat_') ? `Bearer ${token}` : `token ${token}`;
   }
 
-  // 1. Handle specific date query parameter: e.g. /api/github?date=2026-10-06 or /api/github?date=2026-10-06&repo=RigScouter-AI
+  const repoQuery = req.query?.repo ? String(req.query.repo).trim() : null;
   const dateQuery = req.query?.date ? String(req.query.date).trim() : null;
-  if (dateQuery) {
-    const repoFilter = req.query?.repo ? String(req.query.repo).trim() : null;
-    const cleanRepo = repoFilter ? (repoFilter.includes('/') ? repoFilter.split('/')[1] : repoFilter) : null;
-    const cacheKey = `${dateQuery}_${cleanRepo || 'all'}`.toLowerCase();
-    const cachedEntry = dateCache.get(cacheKey);
+  const timeframeQuery = req.query?.timeframe ? String(req.query.timeframe).trim() : null;
+  const tzOffset = req.query?.tz ? String(req.query.tz).trim() : '-07:00';
 
-    if (cachedEntry && (now - cachedEntry.time < DATE_CACHE_DURATION_MS)) {
-      return res.status(200).json({
-        ...cachedEntry.data,
-        cached: true,
-        servedAt: new Date().toISOString(),
-      });
-    }
+  // 1. Handle specific repository query parameter (with or without timeframe):
+  // e.g. /api/github?repo=Datafy&timeframe=last two weeks OR /api/github?repo=Datafy
+  if (repoQuery) {
+    const cleanRepo = repoQuery.includes('/') ? repoQuery.split('/')[1] : repoQuery;
+    const sinceParam = req.query?.since ? String(req.query.since).trim() : null;
+    const untilParam = req.query?.until ? String(req.query.until).trim() : null;
+    const daysParam = req.query?.days ? String(req.query.days).trim() : null;
 
-    try {
-      const searchHeaders = {
-        ...headers,
-        Accept: 'application/vnd.github.cloak-preview+json, application/vnd.github.v3+json',
-      };
-      
-      // Resolve timezone-aware search range for user (America/Los_Angeles, PDT is UTC-7, PST is UTC-8)
-      // If dateQuery is plain YYYY-MM-DD, query with timezone boundaries to prevent UTC day-bleed
-      const tzOffset = req.query?.tz || '-07:00';
-      let dateSearchParam = dateQuery;
-      if (/^\d{4}-\d{2}-\d{2}$/.test(dateQuery)) {
-        dateSearchParam = `${dateQuery}T00:00:00${tzOffset}..${dateQuery}T23:59:59${tzOffset}`;
+    const tfWindow = resolveTimeframeWindow({
+      timeframe: timeframeQuery,
+      days: daysParam,
+      since: sinceParam,
+      until: untilParam,
+      date: dateQuery,
+      tzOffset
+    });
+
+    // 1A. Repository commits over a timeframe / date range
+    if (tfWindow.sinceDate) {
+      const cacheKey = `${cleanRepo}_tf_${tfWindow.sinceDate}_${tfWindow.untilDate || 'now'}`.toLowerCase();
+      const cachedEntry = timeframeRepoCache.get(cacheKey);
+
+      if (cachedEntry && (now - cachedEntry.time < TIMEFRAME_REPO_CACHE_DURATION_MS)) {
+        return res.status(200).json({
+          ...cachedEntry.data,
+          cached: true,
+          servedAt: new Date().toISOString(),
+        });
       }
 
-      const queryParts = [
-        cleanRepo ? `repo:${username}/${cleanRepo}` : `author:${username}`,
-        `committer-date:${dateSearchParam}`,
-      ];
-      const searchQ = queryParts.join('+');
-      const searchUrl = `https://api.github.com/search/commits?q=${searchQ}&sort=committer-date&order=desc&per_page=50`;
-      
-      const searchRes = await fetch(searchUrl, { headers: searchHeaders, cache: 'no-store' });
-      if (searchRes.ok) {
-        const searchData = await searchRes.json();
-        const items = searchData.items || [];
-        
-        // Filter items to ensure they strictly belong to the requested local calendar date
-        const getLocalDateStr = (isoStr) => {
-          try {
-            return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date(isoStr));
-          } catch (e) {
-            return (isoStr || '').split('T')[0];
-          }
-        };
-        const filteredItems = /^\d{4}-\d{2}-\d{2}$/.test(dateQuery)
-          ? items.filter((item) => {
-              const commitDate = item.commit?.committer?.date || item.commit?.author?.date || '';
-              return getLocalDateStr(commitDate) === dateQuery;
-            })
-          : items;
+      try {
+        let fetchUrl = `https://api.github.com/repos/${username}/${cleanRepo}/commits?since=${encodeURIComponent(tfWindow.sinceDate)}&per_page=100`;
+        if (tfWindow.untilDate) {
+          fetchUrl += `&until=${encodeURIComponent(tfWindow.untilDate)}`;
+        }
 
-        const commits = await Promise.all(
-          filteredItems.slice(0, 30).map(async (item) => {
-            const sha = item.sha;
+        const commitsRes = await fetch(fetchUrl, { headers, cache: 'no-store' });
+        if (!commitsRes.ok) {
+          const errText = await commitsRes.text();
+          return res.status(commitsRes.status).json({
+            status: 'error',
+            repository: cleanRepo,
+            error: `GitHub commits API returned status ${commitsRes.status}`,
+            details: errText,
+            servedAt: new Date().toISOString(),
+          });
+        }
+
+        const rawCommits = await commitsRes.json();
+        const filteredCommits = Array.isArray(rawCommits)
+          ? rawCommits.filter((c) => {
+              const author = (c.commit?.author?.name || c.author?.login || '').toLowerCase();
+              const msg = (c.commit?.message || '').toLowerCase();
+              const isBot = author.includes('bot') || author.includes('action');
+              const isWf = msg.includes('loc.csv') || msg.includes('[skip ci]') || msg.includes('auto-update');
+              return !isBot && !isWf;
+            })
+          : [];
+
+        // For top commits (up to 25), fetch detailed line diff stats
+        const detailedCommits = await Promise.all(
+          filteredCommits.slice(0, 25).map(async (c) => {
+            const sha = c.sha;
             const shortSha = sha ? sha.substring(0, 7) : '';
-            const repoFullName = item.repository?.full_name || '';
-            const repoName = item.repository?.name || repoFullName.split('/')[1] || repoFullName;
-            const commitMsg = item.commit?.message?.split('\n')[0] || 'Update repository';
-            const commitDate = item.commit?.committer?.date || item.commit?.author?.date;
-            const commitUrl = item.html_url || `https://github.com/${repoFullName}/commit/${sha}`;
+            const commitMsg = c.commit?.message?.split('\n')[0] || 'Update repository';
+            const commitDate = c.commit?.committer?.date || c.commit?.author?.date;
+            const commitUrl = c.html_url || `https://github.com/${username}/${cleanRepo}/commit/${sha}`;
             
             let stats = { total: 0, additions: 0, deletions: 0 };
             let files = [];
-            
+
             try {
               const detailRes = await fetch(
-                `https://api.github.com/repos/${repoFullName}/commits/${sha}`,
+                `https://api.github.com/repos/${username}/${cleanRepo}/commits/${sha}`,
                 { headers, cache: 'no-store' }
               );
               if (detailRes.ok) {
@@ -137,14 +259,14 @@ export default async function handler(req, res) {
             } catch (err) {
               console.error(`Detail fetch error for commit ${sha}:`, err);
             }
-            
+
             return {
               sha,
               shortSha,
               message: commitMsg,
-              repoName,
-              repoFullName,
-              repoUrl: item.repository?.html_url || `https://github.com/${repoFullName}`,
+              repoName: cleanRepo,
+              repoFullName: `${username}/${cleanRepo}`,
+              repoUrl: `https://github.com/${username}/${cleanRepo}`,
               commitUrl,
               date: commitDate,
               timeAgo: formatTimeAgo(commitDate),
@@ -153,54 +275,60 @@ export default async function handler(req, res) {
               additions: stats.additions || 0,
               deletions: stats.deletions || 0,
               filesCount: files.length,
-              files: files.slice(0, 10),
+              files: files.slice(0, 8),
               author: {
-                name: item.commit?.author?.name || item.author?.login || username,
+                name: c.commit?.author?.name || c.author?.login || username,
                 date: commitDate,
               },
             };
           })
         );
-        
+
+        const totalAdditions = detailedCommits.reduce((acc, c) => acc + (c.additions || 0), 0);
+        const totalDeletions = detailedCommits.reduce((acc, c) => acc + (c.deletions || 0), 0);
+        const totalLinesChanged = detailedCommits.reduce((acc, c) => acc + (c.linesChanged || 0), 0);
+
+        const sincePretty = tfWindow.sinceDate.split('T')[0];
+        const untilPretty = (tfWindow.untilDate || new Date().toISOString()).split('T')[0];
+
+        let directSummary = '';
+        if (detailedCommits.length > 0) {
+          directSummary = `Ishaan made ${detailedCommits.length} commit(s) on ${cleanRepo} during ${tfWindow.resolvedLabel} (${sincePretty} to ${untilPretty}), totaling ${totalLinesChanged.toLocaleString()} lines of code changed (+${totalAdditions.toLocaleString()}/-${totalDeletions.toLocaleString()}).`;
+        } else {
+          directSummary = `Ishaan didn't log any commits for ${cleanRepo} during ${tfWindow.resolvedLabel} (${sincePretty} to ${untilPretty}).`;
+        }
+
         const responseData = {
           status: 'online',
-          date: dateQuery,
-          repository: cleanRepo || null,
-          totalCommits: searchData.total_count ?? commits.length,
-          commits,
+          repository: cleanRepo,
+          timeframe: tfWindow.resolvedLabel,
+          since: tfWindow.sinceDate,
+          until: tfWindow.untilDate,
+          totalCommits: detailedCommits.length,
+          commits: detailedCommits,
+          totalLinesChanged,
+          totalAdditions,
+          totalDeletions,
+          directSummary,
           metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
           metaPagePromotion: "Explore Ishaan's live Meta telemetry dashboard at https://portfolio.ishaankoradia.com/meta for interactive Codebase Evolution (LOC charts), Developer Habits Matrix, and repository constellation.",
           servedAt: new Date().toISOString(),
         };
-        
-        dateCache.set(cacheKey, { data: responseData, time: now });
+
+        timeframeRepoCache.set(cacheKey, { data: responseData, time: now });
         return res.status(200).json(responseData);
-      } else {
-        const errText = await searchRes.text();
-        console.error('Commit search error from GitHub:', searchRes.status, errText);
-        return res.status(searchRes.status).json({
+      } catch (err) {
+        console.error(`Repository timeframe commit error (${cleanRepo}):`, err);
+        return res.status(500).json({
           status: 'error',
-          date: dateQuery,
-          error: `GitHub search API returned status ${searchRes.status}`,
-          details: errText,
+          repository: cleanRepo,
+          error: err.message,
           servedAt: new Date().toISOString(),
         });
       }
-    } catch (dateErr) {
-      console.error(`Date commit search error (${dateQuery}):`, dateErr);
-      return res.status(500).json({
-        status: 'error',
-        date: dateQuery,
-        error: dateErr.message,
-        servedAt: new Date().toISOString(),
-      });
     }
-  }
 
-  // 2. Handle specific repository query parameter immediately: e.g. /api/github?repo=my-data-science-portfolio
-  const repoQuery = req.query?.repo ? String(req.query.repo).trim() : null;
-  if (repoQuery) {
-    const cleanRepo = repoQuery.includes('/') ? repoQuery.split('/')[1] : repoQuery;
+    // 1B. Standard single repository latest commit lookup
     const cacheKey = cleanRepo.toLowerCase();
     const cachedEntry = repoCache.get(cacheKey);
 
@@ -315,6 +443,164 @@ export default async function handler(req, res) {
         status: 'error',
         repository: cleanRepo,
         error: repoErr.message,
+        servedAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  // 2. Handle cross-repository date / timeframe queries (without specific repo)
+  // e.g. /api/github?date=2026-10-06 or /api/github?timeframe=last two weeks
+  const activeDateOrTimeframe = dateQuery || timeframeQuery;
+  if (activeDateOrTimeframe) {
+    const tfWindow = resolveTimeframeWindow({
+      timeframe: timeframeQuery,
+      date: dateQuery,
+      tzOffset
+    });
+
+    const cacheKey = `cross_${tfWindow.sinceDate || activeDateOrTimeframe}_${tfWindow.untilDate || 'now'}`.toLowerCase();
+    const cachedEntry = dateCache.get(cacheKey);
+
+    if (cachedEntry && (now - cachedEntry.time < DATE_CACHE_DURATION_MS)) {
+      return res.status(200).json({
+        ...cachedEntry.data,
+        cached: true,
+        servedAt: new Date().toISOString(),
+      });
+    }
+
+    try {
+      const searchHeaders = {
+        ...headers,
+        Accept: 'application/vnd.cloak-preview+json, application/vnd.github.v3+json',
+      };
+      
+      let dateSearchParam = activeDateOrTimeframe;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(activeDateOrTimeframe)) {
+        dateSearchParam = `${activeDateOrTimeframe}T00:00:00${tzOffset}..${activeDateOrTimeframe}T23:59:59${tzOffset}`;
+      } else if (tfWindow.sinceDate) {
+        const startStr = tfWindow.sinceDate.split('T')[0];
+        const endStr = (tfWindow.untilDate || new Date().toISOString()).split('T')[0];
+        dateSearchParam = `${startStr}..${endStr}`;
+      }
+
+      const queryParts = [
+        `author:${username}`,
+        `committer-date:${dateSearchParam}`,
+      ];
+      const searchQ = queryParts.join('+');
+      const searchUrl = `https://api.github.com/search/commits?q=${searchQ}&sort=committer-date&order=desc&per_page=50`;
+      
+      const searchRes = await fetch(searchUrl, { headers: searchHeaders, cache: 'no-store' });
+      if (searchRes.ok) {
+        const searchData = await searchRes.json();
+        const items = searchData.items || [];
+        
+        // Filter items to ensure they strictly belong to the requested local calendar date
+        const getLocalDateStr = (isoStr) => {
+          try {
+            return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date(isoStr));
+          } catch (e) {
+            return (isoStr || '').split('T')[0];
+          }
+        };
+        const filteredItems = /^\d{4}-\d{2}-\d{2}$/.test(activeDateOrTimeframe)
+          ? items.filter((item) => {
+              const commitDate = item.commit?.committer?.date || item.commit?.author?.date || '';
+              return getLocalDateStr(commitDate) === activeDateOrTimeframe;
+            })
+          : items;
+
+        const commits = await Promise.all(
+          filteredItems.slice(0, 30).map(async (item) => {
+            const sha = item.sha;
+            const shortSha = sha ? sha.substring(0, 7) : '';
+            const repoFullName = item.repository?.full_name || '';
+            const repoName = item.repository?.name || repoFullName.split('/')[1] || repoFullName;
+            const commitMsg = item.commit?.message?.split('\n')[0] || 'Update repository';
+            const commitDate = item.commit?.committer?.date || item.commit?.author?.date;
+            const commitUrl = item.html_url || `https://github.com/${repoFullName}/commit/${sha}`;
+            
+            let stats = { total: 0, additions: 0, deletions: 0 };
+            let files = [];
+            
+            try {
+              const detailRes = await fetch(
+                `https://api.github.com/repos/${repoFullName}/commits/${sha}`,
+                { headers, cache: 'no-store' }
+              );
+              if (detailRes.ok) {
+                const detail = await detailRes.json();
+                stats = detail.stats || stats;
+                files = (detail.files || []).map((f) => ({
+                  filename: f.filename,
+                  status: f.status,
+                  additions: f.additions || 0,
+                  deletions: f.deletions || 0,
+                  changes: f.changes || 0,
+                }));
+              }
+            } catch (err) {
+              console.error(`Detail fetch error for commit ${sha}:`, err);
+            }
+            
+            return {
+              sha,
+              shortSha,
+              message: commitMsg,
+              repoName,
+              repoFullName,
+              repoUrl: item.repository?.html_url || `https://github.com/${repoFullName}`,
+              commitUrl,
+              date: commitDate,
+              timeAgo: formatTimeAgo(commitDate),
+              stats,
+              linesChanged: stats.total || 0,
+              additions: stats.additions || 0,
+              deletions: stats.deletions || 0,
+              filesCount: files.length,
+              files: files.slice(0, 10),
+              author: {
+                name: item.commit?.author?.name || item.author?.login || username,
+                date: commitDate,
+              },
+            };
+          })
+        );
+        
+        const responseData = {
+          status: 'online',
+          date: activeDateOrTimeframe,
+          timeframe: tfWindow.resolvedLabel,
+          since: tfWindow.sinceDate,
+          until: tfWindow.untilDate,
+          repository: null,
+          totalCommits: searchData.total_count ?? commits.length,
+          commits,
+          metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
+          metaPagePromotion: "Explore Ishaan's live Meta telemetry dashboard at https://portfolio.ishaankoradia.com/meta for interactive Codebase Evolution (LOC charts), Developer Habits Matrix, and repository constellation.",
+          servedAt: new Date().toISOString(),
+        };
+        
+        dateCache.set(cacheKey, { data: responseData, time: now });
+        return res.status(200).json(responseData);
+      } else {
+        const errText = await searchRes.text();
+        console.error('Commit search error from GitHub:', searchRes.status, errText);
+        return res.status(searchRes.status).json({
+          status: 'error',
+          date: activeDateOrTimeframe,
+          error: `GitHub search API returned status ${searchRes.status}`,
+          details: errText,
+          servedAt: new Date().toISOString(),
+        });
+      }
+    } catch (dateErr) {
+      console.error(`Date commit search error (${activeDateOrTimeframe}):`, dateErr);
+      return res.status(500).json({
+        status: 'error',
+        date: activeDateOrTimeframe,
+        error: dateErr.message,
         servedAt: new Date().toISOString(),
       });
     }
