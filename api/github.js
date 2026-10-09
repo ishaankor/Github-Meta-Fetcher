@@ -70,9 +70,17 @@ export default async function handler(req, res) {
         Accept: 'application/vnd.github.cloak-preview+json, application/vnd.github.v3+json',
       };
       
+      // Resolve timezone-aware search range for user (America/Los_Angeles, PDT is UTC-7, PST is UTC-8)
+      // If dateQuery is plain YYYY-MM-DD, query with timezone boundaries to prevent UTC day-bleed
+      const tzOffset = req.query?.tz || '-07:00';
+      let dateSearchParam = dateQuery;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateQuery)) {
+        dateSearchParam = `${dateQuery}T00:00:00${tzOffset}..${dateQuery}T23:59:59${tzOffset}`;
+      }
+
       const queryParts = [
         cleanRepo ? `repo:${username}/${cleanRepo}` : `author:${username}`,
-        `committer-date:${dateQuery}`,
+        `committer-date:${dateSearchParam}`,
       ];
       const searchQ = queryParts.join('+');
       const searchUrl = `https://api.github.com/search/commits?q=${searchQ}&sort=committer-date&order=desc&per_page=50`;
@@ -82,8 +90,23 @@ export default async function handler(req, res) {
         const searchData = await searchRes.json();
         const items = searchData.items || [];
         
+        // Filter items to ensure they strictly belong to the requested local calendar date
+        const getLocalDateStr = (isoStr) => {
+          try {
+            return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date(isoStr));
+          } catch (e) {
+            return (isoStr || '').split('T')[0];
+          }
+        };
+        const filteredItems = /^\d{4}-\d{2}-\d{2}$/.test(dateQuery)
+          ? items.filter((item) => {
+              const commitDate = item.commit?.committer?.date || item.commit?.author?.date || '';
+              return getLocalDateStr(commitDate) === dateQuery;
+            })
+          : items;
+
         const commits = await Promise.all(
-          items.slice(0, 30).map(async (item) => {
+          filteredItems.slice(0, 30).map(async (item) => {
             const sha = item.sha;
             const shortSha = sha ? sha.substring(0, 7) : '';
             const repoFullName = item.repository?.full_name || '';
