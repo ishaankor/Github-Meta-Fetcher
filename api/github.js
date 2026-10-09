@@ -23,7 +23,7 @@ function formatTimeAgo(dateString) {
   return `${days}d ago`;
 }
 
-function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset = '-07:00' }) {
+function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset = 'Z' }) {
   const now = new Date();
   let sinceDate = null;
   let untilDate = null;
@@ -195,7 +195,7 @@ export default async function handler(req, res) {
   const repoQuery = req.query?.repo ? String(req.query.repo).trim() : null;
   const dateQuery = req.query?.date ? String(req.query.date).trim() : null;
   const timeframeQuery = req.query?.timeframe ? String(req.query.timeframe).trim() : null;
-  const tzOffset = req.query?.tz ? String(req.query.tz).trim() : '-07:00';
+  const tzOffset = req.query?.tz ? String(req.query.tz).trim() : null;
 
   // 1. Handle specific repository query parameter (with or without timeframe):
   // e.g. /api/github?repo=Datafy&timeframe=last two weeks OR /api/github?repo=Datafy
@@ -211,7 +211,7 @@ export default async function handler(req, res) {
       since: sinceParam,
       until: untilParam,
       date: dateQuery,
-      tzOffset
+      tzOffset: tzOffset || 'Z'
     });
 
     // 1A. Repository commits over a timeframe / date range
@@ -513,10 +513,11 @@ export default async function handler(req, res) {
   // e.g. /api/github?date=2026-10-06 or /api/github?timeframe=last two weeks
   const activeDateOrTimeframe = dateQuery || timeframeQuery;
   if (activeDateOrTimeframe) {
+    const localTz = tzOffset || '-07:00';
     const tfWindow = resolveTimeframeWindow({
       timeframe: timeframeQuery,
       date: dateQuery,
-      tzOffset
+      tzOffset: localTz
     });
 
     const cacheKey = `cross_${tfWindow.sinceDate || activeDateOrTimeframe}_${tfWindow.untilDate || 'now'}`.toLowerCase();
@@ -538,7 +539,7 @@ export default async function handler(req, res) {
       
       let dateSearchParam = activeDateOrTimeframe;
       if (/^\d{4}-\d{2}-\d{2}$/.test(activeDateOrTimeframe)) {
-        dateSearchParam = `${activeDateOrTimeframe}T00:00:00${tzOffset}..${activeDateOrTimeframe}T23:59:59${tzOffset}`;
+        dateSearchParam = `${activeDateOrTimeframe}T00:00:00${localTz}..${activeDateOrTimeframe}T23:59:59${localTz}`;
       } else if (tfWindow.sinceDate) {
         const startStr = tfWindow.sinceDate.split('T')[0];
         const endStr = (tfWindow.untilDate || new Date().toISOString()).split('T')[0];
