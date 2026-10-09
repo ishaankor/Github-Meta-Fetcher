@@ -256,9 +256,13 @@ export default async function handler(req, res) {
             })
           : [];
 
-        // For top commits (up to 25), fetch detailed line diff stats
+        // For top commits (up to 50), fetch detailed line diff stats
+        const DETAILED_LIMIT = 50;
+        const commitsToDetail = filteredCommits.slice(0, DETAILED_LIMIT);
+        const remainingCommits = filteredCommits.slice(DETAILED_LIMIT);
+
         const detailedCommits = await Promise.all(
-          filteredCommits.slice(0, 25).map(async (c) => {
+          commitsToDetail.map(async (c) => {
             const sha = c.sha;
             const shortSha = sha ? sha.substring(0, 7) : '';
             const commitMsg = c.commit?.message?.split('\n')[0] || 'Update repository';
@@ -312,6 +316,35 @@ export default async function handler(req, res) {
           })
         );
 
+        const unDetailedList = remainingCommits.map((c) => {
+          const sha = c.sha;
+          const shortSha = sha ? sha.substring(0, 7) : '';
+          const commitMsg = c.commit?.message?.split('\n')[0] || 'Update repository';
+          const commitDate = c.commit?.committer?.date || c.commit?.author?.date;
+          return {
+            sha,
+            shortSha,
+            message: commitMsg,
+            repoName: cleanRepo,
+            repoFullName: `${username}/${cleanRepo}`,
+            repoUrl: `https://github.com/${username}/${cleanRepo}`,
+            commitUrl: c.html_url || `https://github.com/${username}/${cleanRepo}/commit/${sha}`,
+            date: commitDate,
+            timeAgo: formatTimeAgo(commitDate),
+            stats: { total: 0, additions: 0, deletions: 0 },
+            linesChanged: 0,
+            additions: 0,
+            deletions: 0,
+            filesCount: 0,
+            files: [],
+            author: {
+              name: c.commit?.author?.name || c.author?.login || username,
+              date: commitDate,
+            },
+          };
+        });
+
+        const allCommitsList = [...detailedCommits, ...unDetailedList];
         const totalAdditions = detailedCommits.reduce((acc, c) => acc + (c.additions || 0), 0);
         const totalDeletions = detailedCommits.reduce((acc, c) => acc + (c.deletions || 0), 0);
         const totalLinesChanged = detailedCommits.reduce((acc, c) => acc + (c.linesChanged || 0), 0);
@@ -320,8 +353,8 @@ export default async function handler(req, res) {
         const untilPretty = (tfWindow.untilDate || new Date().toISOString()).split('T')[0];
 
         let directSummary = '';
-        if (detailedCommits.length > 0) {
-          directSummary = `Ishaan made ${detailedCommits.length} commit(s) on ${cleanRepo} during ${tfWindow.resolvedLabel} (${sincePretty} to ${untilPretty}), totaling ${totalLinesChanged.toLocaleString()} lines of code changed (+${totalAdditions.toLocaleString()}/-${totalDeletions.toLocaleString()}).`;
+        if (filteredCommits.length > 0) {
+          directSummary = `Ishaan made ${filteredCommits.length} commit(s) on ${cleanRepo} during ${tfWindow.resolvedLabel} (${sincePretty} to ${untilPretty}), totaling ${totalLinesChanged.toLocaleString()} lines of code changed (+${totalAdditions.toLocaleString()}/-${totalDeletions.toLocaleString()}).`;
         } else {
           directSummary = `Ishaan didn't log any commits for ${cleanRepo} during ${tfWindow.resolvedLabel} (${sincePretty} to ${untilPretty}).`;
         }
@@ -332,8 +365,8 @@ export default async function handler(req, res) {
           timeframe: tfWindow.resolvedLabel,
           since: tfWindow.sinceDate,
           until: tfWindow.untilDate,
-          totalCommits: detailedCommits.length,
-          commits: detailedCommits,
+          totalCommits: filteredCommits.length,
+          commits: allCommitsList,
           totalLinesChanged,
           totalAdditions,
           totalDeletions,
