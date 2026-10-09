@@ -75,7 +75,7 @@ export default async function handler(req, res) {
         `committer-date:${dateQuery}`,
       ];
       const searchQ = queryParts.join('+');
-      const searchUrl = `https://api.github.com/search/commits?q=${searchQ}&sort=committer-date&order=desc&per_page=15`;
+      const searchUrl = `https://api.github.com/search/commits?q=${searchQ}&sort=committer-date&order=desc&per_page=50`;
       
       const searchRes = await fetch(searchUrl, { headers: searchHeaders, cache: 'no-store' });
       if (searchRes.ok) {
@@ -83,7 +83,7 @@ export default async function handler(req, res) {
         const items = searchData.items || [];
         
         const commits = await Promise.all(
-          items.slice(0, 10).map(async (item) => {
+          items.slice(0, 30).map(async (item) => {
             const sha = item.sha;
             const shortSha = sha ? sha.substring(0, 7) : '';
             const repoFullName = item.repository?.full_name || '';
