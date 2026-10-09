@@ -88,31 +88,27 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
   // 6. Natural language relative timeframe strings
   const tf = (timeframe || (date && !/^\d{4}-\d{2}-\d{2}$/.test(String(date)) && !String(date).includes('..') ? String(date) : '')).toLowerCase().trim();
   if (tf && !sinceDate) {
-    if (tf.includes('two week') || tf.includes('2 week') || tf.includes('14 day') || tf.includes('fourteen day') || tf.includes('fortnight')) {
-      sinceDate = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
-      untilDate = untilDate || now;
-      resolvedLabel = 'last two weeks';
-    } else if (tf.includes('three week') || tf.includes('3 week') || tf.includes('21 day')) {
-      sinceDate = new Date(now.getTime() - 21 * 24 * 60 * 60 * 1000);
-      untilDate = untilDate || now;
-      resolvedLabel = 'last 3 weeks';
-    } else if (tf.includes('last week') || tf.includes('one week') || tf.includes('1 week') || tf.includes('7 day') || tf.includes('past week') || tf.includes('seven day') || tf.includes('previous week')) {
-      sinceDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-      untilDate = untilDate || now;
-      resolvedLabel = 'last week';
-    } else if (tf.includes('this week') || tf.includes('current week')) {
-      const startOfWeek = new Date(now);
-      const day = startOfWeek.getDay();
-      startOfWeek.setDate(startOfWeek.getDate() - day);
-      startOfWeek.setHours(0, 0, 0, 0);
-      sinceDate = startOfWeek;
-      untilDate = untilDate || now;
-      resolvedLabel = 'this week';
-    } else if (tf.includes('month') || tf.includes('30 day')) {
-      sinceDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-      untilDate = untilDate || now;
-      resolvedLabel = 'past month';
-    } else if (tf.includes('today')) {
+    const wordToNum = {
+      one: 1, a: 1, an: 1, two: 2, three: 3, four: 4, five: 5,
+      six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+      fourteen: 14, twenty: 20, thirty: 30, sixty: 60, ninety: 90
+    };
+
+    const extractUnitCount = (pattern) => {
+      const match = tf.match(new RegExp(`(?:last|past|previous)?\\s*(\\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fourteen|twenty|thirty|sixty|ninety|a|an)?\\s*${pattern}`, 'i'));
+      if (match) {
+        const val = match[1] ? match[1].toLowerCase() : '1';
+        return parseInt(val, 10) || wordToNum[val] || 1;
+      }
+      return null;
+    };
+
+    const monthCount = extractUnitCount('months?');
+    const weekCount = extractUnitCount('weeks?');
+    const dayCount = extractUnitCount('days?');
+    const yearCount = extractUnitCount('years?');
+
+    if (tf.includes('today')) {
       const startOfDay = new Date(now);
       startOfDay.setHours(0, 0, 0, 0);
       sinceDate = startOfDay;
@@ -127,6 +123,38 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
       sinceDate = startOfYesterday;
       untilDate = endOfYesterday;
       resolvedLabel = 'yesterday';
+    } else if (tf.includes('this week') || tf.includes('current week')) {
+      const startOfWeek = new Date(now);
+      const day = startOfWeek.getDay();
+      startOfWeek.setDate(startOfWeek.getDate() - day);
+      startOfWeek.setHours(0, 0, 0, 0);
+      sinceDate = startOfWeek;
+      untilDate = untilDate || now;
+      resolvedLabel = 'this week';
+    } else if (monthCount !== null) {
+      const d = new Date(now);
+      d.setMonth(d.getMonth() - monthCount);
+      sinceDate = d;
+      untilDate = untilDate || now;
+      resolvedLabel = monthCount === 1 ? 'past month' : `past ${monthCount} months`;
+    } else if (weekCount !== null) {
+      sinceDate = new Date(now.getTime() - weekCount * 7 * 24 * 60 * 60 * 1000);
+      untilDate = untilDate || now;
+      resolvedLabel = weekCount === 1 ? 'last week' : `last ${weekCount} weeks`;
+    } else if (dayCount !== null) {
+      sinceDate = new Date(now.getTime() - dayCount * 24 * 60 * 60 * 1000);
+      untilDate = untilDate || now;
+      resolvedLabel = dayCount === 1 ? 'past day' : `past ${dayCount} days`;
+    } else if (yearCount !== null) {
+      const d = new Date(now);
+      d.setFullYear(d.getFullYear() - yearCount);
+      sinceDate = d;
+      untilDate = untilDate || now;
+      resolvedLabel = yearCount === 1 ? 'past year' : `past ${yearCount} years`;
+    } else if (tf.includes('fortnight')) {
+      sinceDate = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+      untilDate = untilDate || now;
+      resolvedLabel = 'last two weeks';
     }
   }
 
