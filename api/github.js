@@ -3,6 +3,8 @@ let lastFetchTime = 0;
 const CACHE_DURATION_MS = 120 * 1000;
 const repoCache = new Map();
 const REPO_CACHE_DURATION_MS = 120 * 1000;
+const dateCache = new Map();
+const DATE_CACHE_DURATION_MS = 120 * 1000;
 
 function formatTimeAgo(dateString) {
   const date = new Date(dateString);
@@ -46,7 +48,133 @@ export default async function handler(req, res) {
     headers['Authorization'] = token.startsWith('github_pat_') ? `Bearer ${token}` : `token ${token}`;
   }
 
-  // 1. Handle specific repository query parameter immediately: e.g. /api/github?repo=my-data-science-portfolio
+  // 1. Handle specific date query parameter: e.g. /api/github?date=2026-10-06 or /api/github?date=2026-10-06&repo=RigScouter-AI
+  const dateQuery = req.query?.date ? String(req.query.date).trim() : null;
+  if (dateQuery) {
+    const repoFilter = req.query?.repo ? String(req.query.repo).trim() : null;
+    const cleanRepo = repoFilter ? (repoFilter.includes('/') ? repoFilter.split('/')[1] : repoFilter) : null;
+    const cacheKey = `${dateQuery}_${cleanRepo || 'all'}`.toLowerCase();
+    const cachedEntry = dateCache.get(cacheKey);
+
+    if (cachedEntry && (now - cachedEntry.time < DATE_CACHE_DURATION_MS)) {
+      return res.status(200).json({
+        ...cachedEntry.data,
+        cached: true,
+        servedAt: new Date().toISOString(),
+      });
+    }
+
+    try {
+      const searchHeaders = {
+        ...headers,
+        Accept: 'application/vnd.github.cloak-preview+json, application/vnd.github.v3+json',
+      };
+      
+      const queryParts = [
+        cleanRepo ? `repo:${username}/${cleanRepo}` : `author:${username}`,
+        `committer-date:${dateQuery}`,
+      ];
+      const searchQ = queryParts.join('+');
+      const searchUrl = `https://api.github.com/search/commits?q=${searchQ}&sort=committer-date&order=desc&per_page=15`;
+      
+      const searchRes = await fetch(searchUrl, { headers: searchHeaders, cache: 'no-store' });
+      if (searchRes.ok) {
+        const searchData = await searchRes.json();
+        const items = searchData.items || [];
+        
+        const commits = await Promise.all(
+          items.slice(0, 10).map(async (item) => {
+            const sha = item.sha;
+            const shortSha = sha ? sha.substring(0, 7) : '';
+            const repoFullName = item.repository?.full_name || '';
+            const repoName = item.repository?.name || repoFullName.split('/')[1] || repoFullName;
+            const commitMsg = item.commit?.message?.split('\n')[0] || 'Update repository';
+            const commitDate = item.commit?.committer?.date || item.commit?.author?.date;
+            const commitUrl = item.html_url || `https://github.com/${repoFullName}/commit/${sha}`;
+            
+            let stats = { total: 0, additions: 0, deletions: 0 };
+            let files = [];
+            
+            try {
+              const detailRes = await fetch(
+                `https://api.github.com/repos/${repoFullName}/commits/${sha}`,
+                { headers, cache: 'no-store' }
+              );
+              if (detailRes.ok) {
+                const detail = await detailRes.json();
+                stats = detail.stats || stats;
+                files = (detail.files || []).map((f) => ({
+                  filename: f.filename,
+                  status: f.status,
+                  additions: f.additions || 0,
+                  deletions: f.deletions || 0,
+                  changes: f.changes || 0,
+                }));
+              }
+            } catch (err) {
+              console.error(`Detail fetch error for commit ${sha}:`, err);
+            }
+            
+            return {
+              sha,
+              shortSha,
+              message: commitMsg,
+              repoName,
+              repoFullName,
+              repoUrl: item.repository?.html_url || `https://github.com/${repoFullName}`,
+              commitUrl,
+              date: commitDate,
+              timeAgo: formatTimeAgo(commitDate),
+              stats,
+              linesChanged: stats.total || 0,
+              additions: stats.additions || 0,
+              deletions: stats.deletions || 0,
+              filesCount: files.length,
+              files: files.slice(0, 10),
+              author: {
+                name: item.commit?.author?.name || item.author?.login || username,
+                date: commitDate,
+              },
+            };
+          })
+        );
+        
+        const responseData = {
+          status: 'online',
+          date: dateQuery,
+          repository: cleanRepo || null,
+          totalCommits: searchData.total_count ?? commits.length,
+          commits,
+          metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
+          metaPagePromotion: "Explore Ishaan's live Meta telemetry dashboard at https://portfolio.ishaankoradia.com/meta for interactive Codebase Evolution (LOC charts), Developer Habits Matrix, and repository constellation.",
+          servedAt: new Date().toISOString(),
+        };
+        
+        dateCache.set(cacheKey, { data: responseData, time: now });
+        return res.status(200).json(responseData);
+      } else {
+        const errText = await searchRes.text();
+        console.error('Commit search error from GitHub:', searchRes.status, errText);
+        return res.status(searchRes.status).json({
+          status: 'error',
+          date: dateQuery,
+          error: `GitHub search API returned status ${searchRes.status}`,
+          details: errText,
+          servedAt: new Date().toISOString(),
+        });
+      }
+    } catch (dateErr) {
+      console.error(`Date commit search error (${dateQuery}):`, dateErr);
+      return res.status(500).json({
+        status: 'error',
+        date: dateQuery,
+        error: dateErr.message,
+        servedAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  // 2. Handle specific repository query parameter immediately: e.g. /api/github?repo=my-data-science-portfolio
   const repoQuery = req.query?.repo ? String(req.query.repo).trim() : null;
   if (repoQuery) {
     const cleanRepo = repoQuery.includes('/') ? repoQuery.split('/')[1] : repoQuery;
