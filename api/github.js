@@ -4,9 +4,9 @@ const CACHE_DURATION_MS = 120 * 1000;
 const repoCache = new Map();
 const REPO_CACHE_DURATION_MS = 120 * 1000;
 const dateCache = new Map();
-const DATE_CACHE_DURATION_MS = 120 * 1000;
+const DATE_CACHE_DURATION_MS = 300 * 1000;
 const timeframeRepoCache = new Map();
-const TIMEFRAME_REPO_CACHE_DURATION_MS = 120 * 1000;
+const TIMEFRAME_REPO_CACHE_DURATION_MS = 300 * 1000;
 
 function formatTimeAgo(dateString) {
   const date = new Date(dateString);
@@ -537,28 +537,57 @@ export default async function handler(req, res) {
         Accept: 'application/vnd.cloak-preview+json, application/vnd.github.v3+json',
       };
       
-      let dateSearchParam = activeDateOrTimeframe;
-      if (/^\d{4}-\d{2}-\d{2}$/.test(activeDateOrTimeframe)) {
-        dateSearchParam = `${activeDateOrTimeframe}T00:00:00${localTz}..${activeDateOrTimeframe}T23:59:59${localTz}`;
-      } else if (tfWindow.sinceDate) {
-        const startStr = tfWindow.sinceDate.split('T')[0];
-        const endStr = (tfWindow.untilDate || new Date().toISOString()).split('T')[0];
-        dateSearchParam = `${startStr}..${endStr}`;
+      const isLifetimeQuery = String(activeDateOrTimeframe).trim().toLowerCase() === 'all' || 
+                              String(activeDateOrTimeframe).trim().toLowerCase() === 'lifetime';
+
+      let dateSearchParam = null;
+      if (!isLifetimeQuery) {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(activeDateOrTimeframe)) {
+          dateSearchParam = `${activeDateOrTimeframe}T00:00:00${localTz}..${activeDateOrTimeframe}T23:59:59${localTz}`;
+        } else if (tfWindow.sinceDate) {
+          const startStr = tfWindow.sinceDate.split('T')[0];
+          const endStr = (tfWindow.untilDate || new Date().toISOString()).split('T')[0];
+          dateSearchParam = `${startStr}..${endStr}`;
+        } else {
+          dateSearchParam = activeDateOrTimeframe;
+        }
       }
 
-      const queryParts = [
-        `author:${username}`,
-        `committer-date:${dateSearchParam}`,
-      ];
+      const queryParts = [`author:${username}`];
+      if (dateSearchParam) {
+        queryParts.push(`committer-date:${dateSearchParam}`);
+      }
       const searchQ = queryParts.join('+');
-      const searchUrl = `https://api.github.com/search/commits?q=${searchQ}&sort=committer-date&order=desc&per_page=50`;
+      const baseSearchUrl = `https://api.github.com/search/commits?q=${searchQ}&sort=committer-date&order=desc&per_page=100`;
       
-      const searchRes = await fetch(searchUrl, { headers: searchHeaders, cache: 'no-store' });
+      const searchRes = await fetch(`${baseSearchUrl}&page=1`, { headers: searchHeaders, cache: 'no-store' });
       if (searchRes.ok) {
         const searchData = await searchRes.json();
-        const items = searchData.items || [];
+        const totalCount = searchData.total_count ?? 0;
+        let allItems = searchData.items || [];
+
+        // Concurrently paginate up to 10 pages (max 1,000 commits) to capture all historical repositories & commit counts
+        if (totalCount > 100) {
+          const totalPagesToFetch = Math.min(Math.ceil(totalCount / 100), 10);
+          const pagePromises = [];
+          for (let p = 2; p <= totalPagesToFetch; p++) {
+            pagePromises.push(
+              fetch(`${baseSearchUrl}&page=${p}`, { headers: searchHeaders, cache: 'no-store' })
+                .then((r) => (r.ok ? r.json() : { items: [] }))
+                .then((d) => d.items || [])
+                .catch((e) => {
+                  console.error(`Page ${p} fetch warning:`, e);
+                  return [];
+                })
+            );
+          }
+          const extraPages = await Promise.all(pagePromises);
+          for (const extraItems of extraPages) {
+            allItems = allItems.concat(extraItems);
+          }
+        }
         
-        // Filter items to ensure they strictly belong to the requested local calendar date
+        // Filter items strictly for single-day queries if needed
         const getLocalDateStr = (isoStr) => {
           try {
             return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date(isoStr));
@@ -567,18 +596,29 @@ export default async function handler(req, res) {
           }
         };
         const filteredItems = /^\d{4}-\d{2}-\d{2}$/.test(activeDateOrTimeframe)
-          ? items.filter((item) => {
+          ? allItems.filter((item) => {
               const commitDate = item.commit?.committer?.date || item.commit?.author?.date || '';
               return getLocalDateStr(commitDate) === activeDateOrTimeframe;
             })
-          : items;
+          : allItems;
 
+        // Group repositories and counts across the complete dataset
+        const repoCounts = {};
+        filteredItems.forEach((item) => {
+          const repoFullName = item.repository?.full_name || '';
+          const repoName = item.repository?.name || (repoFullName.includes('/') ? repoFullName.split('/')[1] : repoFullName) || 'unknown';
+          repoCounts[repoName] = (repoCounts[repoName] || 0) + 1;
+        });
+
+        const activeRepositories = Object.keys(repoCounts).sort();
+
+        // Enrich the top 30 commits for fast Vercel execution (fetch line diffs for top 12)
         const commits = await Promise.all(
-          filteredItems.slice(0, 30).map(async (item) => {
+          filteredItems.slice(0, 30).map(async (item, idx) => {
             const sha = item.sha;
             const shortSha = sha ? sha.substring(0, 7) : '';
             const repoFullName = item.repository?.full_name || '';
-            const repoName = item.repository?.name || repoFullName.split('/')[1] || repoFullName;
+            const repoName = item.repository?.name || (repoFullName.includes('/') ? repoFullName.split('/')[1] : repoFullName) || '';
             const commitMsg = item.commit?.message?.split('\n')[0] || 'Update repository';
             const commitDate = item.commit?.committer?.date || item.commit?.author?.date;
             const commitUrl = item.html_url || `https://github.com/${repoFullName}/commit/${sha}`;
@@ -586,24 +626,26 @@ export default async function handler(req, res) {
             let stats = { total: 0, additions: 0, deletions: 0 };
             let files = [];
             
-            try {
-              const detailRes = await fetch(
-                `https://api.github.com/repos/${repoFullName}/commits/${sha}`,
-                { headers, cache: 'no-store' }
-              );
-              if (detailRes.ok) {
-                const detail = await detailRes.json();
-                stats = detail.stats || stats;
-                files = (detail.files || []).map((f) => ({
-                  filename: f.filename,
-                  status: f.status,
-                  additions: f.additions || 0,
-                  deletions: f.deletions || 0,
-                  changes: f.changes || 0,
-                }));
+            if (idx < 12) {
+              try {
+                const detailRes = await fetch(
+                  `https://api.github.com/repos/${repoFullName}/commits/${sha}`,
+                  { headers, cache: 'no-store' }
+                );
+                if (detailRes.ok) {
+                  const detail = await detailRes.json();
+                  stats = detail.stats || stats;
+                  files = (detail.files || []).map((f) => ({
+                    filename: f.filename,
+                    status: f.status,
+                    additions: f.additions || 0,
+                    deletions: f.deletions || 0,
+                    changes: f.changes || 0,
+                  }));
+                }
+              } catch (err) {
+                console.error(`Detail fetch error for commit ${sha}:`, err);
               }
-            } catch (err) {
-              console.error(`Detail fetch error for commit ${sha}:`, err);
             }
             
             return {
@@ -630,14 +672,25 @@ export default async function handler(req, res) {
           })
         );
         
+        const breakdownParts = Object.entries(repoCounts)
+          .sort((a, b) => b[1] - a[1])
+          .map(([r, c]) => `${r} (${c} commit${c !== 1 ? 's' : ''})`);
+        const directSummary = activeRepositories.length === 0
+          ? `No commits found for ${activeDateOrTimeframe}.`
+          : `Worked on ${activeRepositories.length} repositories: ${breakdownParts.join(', ')} (totaling ${totalCount} commits).`;
+
         const responseData = {
           status: 'online',
           date: activeDateOrTimeframe,
-          timeframe: tfWindow.resolvedLabel,
+          timeframe: isLifetimeQuery ? 'lifetime (all time)' : tfWindow.resolvedLabel,
           since: tfWindow.sinceDate,
           until: tfWindow.untilDate,
           repository: null,
-          totalCommits: searchData.total_count ?? commits.length,
+          totalCommits: totalCount,
+          activeRepositories,
+          totalRepositoriesWorkedOn: activeRepositories.length,
+          repositoryCommitCounts: repoCounts,
+          directSummary,
           commits,
           metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
           metaPagePromotion: "Explore Ishaan's live Meta telemetry dashboard at https://portfolio.ishaankoradia.com/meta for interactive Codebase Evolution (LOC charts), Developer Habits Matrix, and repository constellation.",
@@ -757,6 +810,23 @@ export default async function handler(req, res) {
       } catch (locErr) {
         console.warn('Meta LOC dataset parse warning:', locErr);
       }
+    }
+
+    // Fetch total lifetime commits across entire GitHub account from start to present
+    try {
+      const searchHeaders = {
+        ...headers,
+        Accept: 'application/vnd.cloak-preview+json, application/vnd.github.v3+json',
+      };
+      const lifetimeRes = await fetch(`https://api.github.com/search/commits?q=author:${username}`, { headers: searchHeaders, cache: 'no-store' });
+      if (lifetimeRes.ok) {
+        const lifetimeJson = await lifetimeRes.json();
+        if (lifetimeJson.total_count) {
+          metaTelemetry.totalHistoricalCommits = lifetimeJson.total_count;
+        }
+      }
+    } catch (lifetimeErr) {
+      console.warn('Lifetime commits search error:', lifetimeErr);
     }
 
     if (token) {
