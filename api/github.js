@@ -62,8 +62,13 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
   // 4. Date range formatted with '..' (e.g. 2026-09-25..2026-10-09)
   if (date && String(date).includes('..')) {
     const [startStr, endStr] = String(date).split('..');
-    const s = startStr.trim();
-    const e = endStr.trim();
+    let s = startStr.trim();
+    let e = endStr.trim();
+    if (s && e && s > e) {
+      const tmp = s;
+      s = e;
+      e = tmp;
+    }
     if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
       sinceDate = new Date(`${s}T00:00:00${tzOffset}`);
     } else {
@@ -156,6 +161,14 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
       untilDate = untilDate || now;
       resolvedLabel = 'last two weeks';
     }
+  }
+
+  if (sinceDate && isNaN(sinceDate.getTime())) sinceDate = null;
+  if (untilDate && isNaN(untilDate.getTime())) untilDate = null;
+  if (sinceDate && untilDate && sinceDate > untilDate) {
+    const tmp = sinceDate;
+    sinceDate = untilDate;
+    untilDate = tmp;
   }
 
   return {
