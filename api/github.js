@@ -165,6 +165,17 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
   };
 }
 
+const KNOWN_EARLIEST_COMMIT = {
+  sha: 'a160dabb1e3a89bbf897c7d0bedf7c7eee92cef2',
+  shortSha: 'a160dab',
+  message: 'Initial commit',
+  repoName: 'Daily-Motivation-',
+  repoFullName: 'ishaankor/Daily-Motivation-',
+  commitUrl: 'https://github.com/ishaankor/Daily-Motivation-/commit/a160dabb1e3a89bbf897c7d0bedf7c7eee92cef2',
+  date: '2022-09-08T22:41:44.000-07:00',
+  timeAgo: formatTimeAgo('2022-09-08T22:41:44.000-07:00'),
+};
+
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -196,6 +207,9 @@ export default async function handler(req, res) {
   const dateQuery = req.query?.date ? String(req.query.date).trim() : null;
   const timeframeQuery = req.query?.timeframe ? String(req.query.timeframe).trim() : null;
   const tzOffset = req.query?.tz ? String(req.query.tz).trim() : null;
+  const rawOrder = req.query?.order ? String(req.query.order).trim().toLowerCase() : '';
+  const orderQuery = (rawOrder === 'asc' || rawOrder === 'oldest' || rawOrder === 'earliest') ? 'asc' : 'desc';
+  const limitQuery = req.query?.limit ? Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100) : 30;
 
   // 1. Handle specific repository query parameter (with or without timeframe):
   // e.g. /api/github?repo=Datafy&timeframe=last two weeks OR /api/github?repo=Datafy
@@ -520,7 +534,7 @@ export default async function handler(req, res) {
       tzOffset: localTz
     });
 
-    const cacheKey = `cross_${tfWindow.sinceDate || activeDateOrTimeframe}_${tfWindow.untilDate || 'now'}`.toLowerCase();
+    const cacheKey = `cross_${tfWindow.sinceDate || activeDateOrTimeframe}_${tfWindow.untilDate || 'now'}_${orderQuery}_${limitQuery}`.toLowerCase();
     const cachedEntry = dateCache.get(cacheKey);
 
     if (cachedEntry && (now - cachedEntry.time < DATE_CACHE_DURATION_MS)) {
@@ -558,7 +572,7 @@ export default async function handler(req, res) {
         queryParts.push(`committer-date:${dateSearchParam}`);
       }
       const searchQ = queryParts.join('+');
-      const baseSearchUrl = `https://api.github.com/search/commits?q=${searchQ}&sort=committer-date&order=desc&per_page=100`;
+      const baseSearchUrl = `https://api.github.com/search/commits?q=${searchQ}&sort=committer-date&order=${orderQuery}&per_page=100`;
       
       const searchRes = await fetch(`${baseSearchUrl}&page=1`, { headers: searchHeaders, cache: 'no-store' });
       if (searchRes.ok) {
@@ -612,9 +626,9 @@ export default async function handler(req, res) {
 
         const activeRepositories = Object.keys(repoCounts).sort();
 
-        // Enrich the top 30 commits for fast Vercel execution (fetch line diffs for top 12)
+        // Enrich the top commits respecting limitQuery for fast Vercel execution (fetch line diffs for top 12)
         const commits = await Promise.all(
-          filteredItems.slice(0, 30).map(async (item, idx) => {
+          filteredItems.slice(0, limitQuery).map(async (item, idx) => {
             const sha = item.sha;
             const shortSha = sha ? sha.substring(0, 7) : '';
             const repoFullName = item.repository?.full_name || '';
@@ -672,25 +686,103 @@ export default async function handler(req, res) {
           })
         );
         
+        const formatItemCommit = (it) => {
+          if (!it) return null;
+          const sha = it.sha || '';
+          const repoFullName = it.repository?.full_name || '';
+          const repoName = it.repository?.name || (repoFullName.includes('/') ? repoFullName.split('/')[1] : repoFullName) || '';
+          const commitDate = it.commit?.committer?.date || it.commit?.author?.date;
+          return {
+            sha,
+            shortSha: sha.substring(0, 7),
+            message: it.commit?.message?.split('\n')[0] || '',
+            repoName,
+            repoFullName,
+            commitUrl: it.html_url || `https://github.com/${repoFullName}/commit/${sha}`,
+            date: commitDate,
+            timeAgo: formatTimeAgo(commitDate),
+          };
+        };
+
+        let calculatedEarliestCommit = null;
+        let calculatedLatestCommit = null;
+
+        if (isLifetimeQuery) {
+          calculatedEarliestCommit = KNOWN_EARLIEST_COMMIT;
+          calculatedLatestCommit = commits.length > 0 ? (orderQuery === 'desc' ? commits[0] : commits[commits.length - 1]) : null;
+        } else if (filteredItems.length > 0) {
+          const earliestItem = orderQuery === 'asc' ? filteredItems[0] : filteredItems[filteredItems.length - 1];
+          const latestItem = orderQuery === 'desc' ? filteredItems[0] : filteredItems[filteredItems.length - 1];
+          calculatedEarliestCommit = formatItemCommit(earliestItem);
+          calculatedLatestCommit = formatItemCommit(latestItem);
+        }
+
+        // Repository chronological list (in order of first commit in this dataset)
+        const repoFirstCommits = {};
+        filteredItems.forEach((item) => {
+          const repoFullName = item.repository?.full_name || '';
+          const repoName = item.repository?.name || (repoFullName.includes('/') ? repoFullName.split('/')[1] : repoFullName) || 'unknown';
+          const commitDate = item.commit?.committer?.date || item.commit?.author?.date || '';
+          const commitMsg = item.commit?.message?.split('\n')[0] || '';
+          const sha = item.sha || '';
+          const shortSha = sha ? sha.substring(0, 7) : '';
+          
+          if (!repoFirstCommits[repoName] || commitDate < repoFirstCommits[repoName].date) {
+            repoFirstCommits[repoName] = {
+              date: commitDate,
+              message: commitMsg,
+              shortSha,
+              sha,
+              commitUrl: item.html_url || `https://github.com/${repoFullName}/commit/${sha}`
+            };
+          }
+        });
+
+        const activeRepositoriesChronological = Object.keys(repoCounts)
+          .map((r) => ({
+            repository: r,
+            commitCount: repoCounts[r] || 0,
+            firstCommitDate: repoFirstCommits[r]?.date || null,
+            firstCommitMessage: repoFirstCommits[r]?.message || null,
+            firstCommitSha: repoFirstCommits[r]?.shortSha || null,
+            firstCommitUrl: repoFirstCommits[r]?.commitUrl || null,
+          }))
+          .sort((a, b) => {
+            if (!a.firstCommitDate) return 1;
+            if (!b.firstCommitDate) return -1;
+            return a.firstCommitDate.localeCompare(b.firstCommitDate);
+          });
+        
         const breakdownParts = Object.entries(repoCounts)
           .sort((a, b) => b[1] - a[1])
           .map(([r, c]) => `${r} (${c} commit${c !== 1 ? 's' : ''})`);
-        const directSummary = activeRepositories.length === 0
+        let directSummary = activeRepositories.length === 0
           ? `No commits found for ${activeDateOrTimeframe}.`
           : `Worked on ${activeRepositories.length} repositories: ${breakdownParts.join(', ')} (totaling ${totalCount} commits).`;
+
+        if (orderQuery === 'asc' && calculatedEarliestCommit) {
+          const eDateStr = (calculatedEarliestCommit.date || '').split('T')[0];
+          directSummary += ` Earliest commit in this query was in '${calculatedEarliestCommit.repoName}' on ${eDateStr} with message '${calculatedEarliestCommit.message}' (${calculatedEarliestCommit.shortSha}).`;
+        }
 
         const responseData = {
           status: 'online',
           date: activeDateOrTimeframe,
           timeframe: isLifetimeQuery ? 'lifetime (all time)' : tfWindow.resolvedLabel,
+          order: orderQuery,
+          limit: limitQuery,
           since: tfWindow.sinceDate,
           until: tfWindow.untilDate,
           repository: null,
           totalCommits: totalCount,
           activeRepositories,
+          activeRepositoriesChronological,
           totalRepositoriesWorkedOn: activeRepositories.length,
           repositoryCommitCounts: repoCounts,
           directSummary,
+          earliestCommit: calculatedEarliestCommit,
+          firstCommit: calculatedEarliestCommit,
+          latestCommit: calculatedLatestCommit,
           commits,
           metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
           metaPagePromotion: "Explore Ishaan's live Meta telemetry dashboard at https://portfolio.ishaankoradia.com/meta for interactive Codebase Evolution (LOC charts), Developer Habits Matrix, and repository constellation.",
@@ -812,22 +904,48 @@ export default async function handler(req, res) {
       }
     }
 
-    // Fetch total lifetime commits across entire GitHub account from start to present
+    // Fetch total lifetime commits and earliest commit across entire GitHub account from start to present
+    let earliestCommit = KNOWN_EARLIEST_COMMIT;
     try {
       const searchHeaders = {
         ...headers,
         Accept: 'application/vnd.cloak-preview+json, application/vnd.github.v3+json',
       };
-      const lifetimeRes = await fetch(`https://api.github.com/search/commits?q=author:${username}`, { headers: searchHeaders, cache: 'no-store' });
+      const [lifetimeRes, earliestRes] = await Promise.all([
+        fetch(`https://api.github.com/search/commits?q=author:${username}`, { headers: searchHeaders, cache: 'no-store' }),
+        fetch(`https://api.github.com/search/commits?q=author:${username}&sort=committer-date&order=asc&per_page=1`, { headers: searchHeaders, cache: 'no-store' })
+      ]);
       if (lifetimeRes.ok) {
         const lifetimeJson = await lifetimeRes.json();
         if (lifetimeJson.total_count) {
           metaTelemetry.totalHistoricalCommits = lifetimeJson.total_count;
         }
       }
+      if (earliestRes && earliestRes.ok) {
+        const earliestJson = await earliestRes.json();
+        if (earliestJson.items && earliestJson.items.length > 0) {
+          const item = earliestJson.items[0];
+          const r_full = item.repository?.full_name || `${username}/Daily-Motivation-`;
+          const r_short = item.repository?.name || r_full.split('/')[1] || r_full;
+          const c_sha = item.sha || KNOWN_EARLIEST_COMMIT.sha;
+          const c_date = item.commit?.committer?.date || item.commit?.author?.date || KNOWN_EARLIEST_COMMIT.date;
+          earliestCommit = {
+            sha: c_sha,
+            shortSha: c_sha.substring(0, 7),
+            message: item.commit?.message?.split('\n')[0] || 'Initial commit',
+            repoName: r_short,
+            repoFullName: r_full,
+            commitUrl: item.html_url || `https://github.com/${r_full}/commit/${c_sha}`,
+            date: c_date,
+            timeAgo: formatTimeAgo(c_date),
+          };
+        }
+      }
     } catch (lifetimeErr) {
       console.warn('Lifetime commits search error:', lifetimeErr);
     }
+    metaTelemetry.earliestCommit = earliestCommit;
+    metaTelemetry.firstCommit = earliestCommit;
 
     if (token) {
       try {
@@ -1078,6 +1196,8 @@ export default async function handler(req, res) {
       repos: reposData,
       commits: enrichedCommits,
       latestCommit,
+      earliestCommit,
+      firstCommit: earliestCommit,
       metaTelemetry,
       contributionCalendar,
       totalRepos: reposData.length,
@@ -1102,9 +1222,13 @@ export default async function handler(req, res) {
       repos: [],
       commits: [],
       latestCommit: null,
+      earliestCommit: KNOWN_EARLIEST_COMMIT,
+      firstCommit: KNOWN_EARLIEST_COMMIT,
       metaTelemetry: {
         metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
         promotionCallout: "Explore Ishaan's live Meta telemetry dashboard at https://portfolio.ishaankoradia.com/meta",
+        earliestCommit: KNOWN_EARLIEST_COMMIT,
+        firstCommit: KNOWN_EARLIEST_COMMIT,
       },
       error: error.message,
     };
