@@ -717,8 +717,9 @@ export default async function handler(req, res) {
           calculatedLatestCommit = formatItemCommit(latestItem);
         }
 
-        // Repository chronological list (in order of first commit in this dataset)
+        // Repository telemetry collections (first commit, latest commit, activity volume)
         const repoFirstCommits = {};
+        const repoLatestCommits = {};
         filteredItems.forEach((item) => {
           const repoFullName = item.repository?.full_name || '';
           const repoName = item.repository?.name || (repoFullName.includes('/') ? repoFullName.split('/')[1] : repoFullName) || 'unknown';
@@ -726,19 +727,30 @@ export default async function handler(req, res) {
           const commitMsg = item.commit?.message?.split('\n')[0] || '';
           const sha = item.sha || '';
           const shortSha = sha ? sha.substring(0, 7) : '';
+          const commitUrl = item.html_url || `https://github.com/${repoFullName}/commit/${sha}`;
           
-          if (!repoFirstCommits[repoName] || commitDate < repoFirstCommits[repoName].date) {
+          if (!repoFirstCommits[repoName] || (commitDate && commitDate < repoFirstCommits[repoName].date)) {
             repoFirstCommits[repoName] = {
               date: commitDate,
               message: commitMsg,
               shortSha,
               sha,
-              commitUrl: item.html_url || `https://github.com/${repoFullName}/commit/${sha}`
+              commitUrl
+            };
+          }
+
+          if (!repoLatestCommits[repoName] || (commitDate && commitDate > repoLatestCommits[repoName].date)) {
+            repoLatestCommits[repoName] = {
+              date: commitDate,
+              message: commitMsg,
+              shortSha,
+              sha,
+              commitUrl
             };
           }
         });
 
-        const activeRepositoriesChronological = Object.keys(repoCounts)
+        const repositoriesByFirstCommit = Object.keys(repoCounts)
           .map((r) => ({
             repository: r,
             commitCount: repoCounts[r] || 0,
@@ -746,12 +758,25 @@ export default async function handler(req, res) {
             firstCommitMessage: repoFirstCommits[r]?.message || null,
             firstCommitSha: repoFirstCommits[r]?.shortSha || null,
             firstCommitUrl: repoFirstCommits[r]?.commitUrl || null,
+            latestCommitDate: repoLatestCommits[r]?.date || null,
+            latestCommitMessage: repoLatestCommits[r]?.message || null,
+            latestCommitSha: repoLatestCommits[r]?.shortSha || null,
+            latestCommitUrl: repoLatestCommits[r]?.commitUrl || null,
           }))
           .sort((a, b) => {
             if (!a.firstCommitDate) return 1;
             if (!b.firstCommitDate) return -1;
             return a.firstCommitDate.localeCompare(b.firstCommitDate);
           });
+
+        const repositoriesByLatestCommit = [...repositoriesByFirstCommit].sort((a, b) => {
+          if (!a.latestCommitDate) return 1;
+          if (!b.latestCommitDate) return -1;
+          return b.latestCommitDate.localeCompare(a.latestCommitDate);
+        });
+
+        const repositoriesByActivity = [...repositoriesByFirstCommit].sort((a, b) => b.commitCount - a.commitCount);
+        const activeRepositoriesChronological = repositoriesByFirstCommit;
         
         const breakdownParts = Object.entries(repoCounts)
           .sort((a, b) => b[1] - a[1])
@@ -777,6 +802,9 @@ export default async function handler(req, res) {
           totalCommits: totalCount,
           activeRepositories,
           activeRepositoriesChronological,
+          repositoriesByFirstCommit,
+          repositoriesByLatestCommit,
+          repositoriesByActivity,
           totalRepositoriesWorkedOn: activeRepositories.length,
           repositoryCommitCounts: repoCounts,
           directSummary,
