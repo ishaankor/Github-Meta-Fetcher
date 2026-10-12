@@ -23,6 +23,84 @@ function formatTimeAgo(dateString) {
   return `${days}d ago`;
 }
 
+function parseNaturalDate(inputStr, now, tzOffset = 'Z', isEndOfDay = false) {
+  if (!inputStr) return null;
+  const s = String(inputStr).trim().toLowerCase();
+  if (s === 'today' || s === 'now' || s === 'present') {
+    const d = new Date(now);
+    if (isEndOfDay) {
+      d.setHours(23, 59, 59, 999);
+    } else {
+      d.setHours(0, 0, 0, 0);
+    }
+    return d;
+  }
+  if (s === 'yesterday') {
+    const d = new Date(now);
+    d.setDate(d.getDate() - 1);
+    if (isEndOfDay) {
+      d.setHours(23, 59, 59, 999);
+    } else {
+      d.setHours(0, 0, 0, 0);
+    }
+    return d;
+  }
+  const isoMatch = s.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+  if (isoMatch) {
+    const timeStr = isEndOfDay ? '23:59:59' : '00:00:00';
+    return new Date(`${isoMatch[1]}T${timeStr}${tzOffset}`);
+  }
+
+  // Holiday resolution
+  const yearMatch = s.match(/\b(20\d{2})\b/);
+  const curYear = now.getFullYear();
+  const yr = yearMatch ? parseInt(yearMatch[1], 10) : curYear;
+
+  if (s.includes('christmas') || s.includes('xmas')) {
+    const day = s.includes('eve') ? '24' : '25';
+    const finalYear = yearMatch ? yr : (now < new Date(curYear, 11, 24) ? curYear - 1 : curYear);
+    const timeStr = isEndOfDay ? '23:59:59' : '00:00:00';
+    return new Date(`${finalYear}-12-${day}T${timeStr}${tzOffset}`);
+  }
+  if (s.includes('new year')) {
+    if (s.includes('eve')) {
+      const finalYear = yearMatch ? yr : (now.getMonth() < 1 ? curYear - 1 : curYear);
+      const timeStr = isEndOfDay ? '23:59:59' : '00:00:00';
+      return new Date(`${finalYear}-12-31T${timeStr}${tzOffset}`);
+    }
+    const timeStr = isEndOfDay ? '23:59:59' : '00:00:00';
+    return new Date(`${yr}-01-01T${timeStr}${tzOffset}`);
+  }
+  if (s.includes('halloween')) {
+    const timeStr = isEndOfDay ? '23:59:59' : '00:00:00';
+    return new Date(`${yr}-10-31T${timeStr}${tzOffset}`);
+  }
+  if (s.includes('thanksgiving')) {
+    const nov1 = new Date(yr, 10, 1);
+    const thursdayOffset = (4 - nov1.getDay() + 7) % 7;
+    const day = 1 + thursdayOffset + 21;
+    const timeStr = isEndOfDay ? '23:59:59' : '00:00:00';
+    return new Date(`${yr}-11-${String(day).padStart(2, '0')}T${timeStr}${tzOffset}`);
+  }
+
+  // Month day patterns: e.g. "october 6", "oct 6", "july 27, 2026"
+  const months = {
+    jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4,
+    may: 5, jun: 6, june: 6, jul: 7, july: 7, aug: 8, august: 8, sep: 9, september: 9,
+    oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12
+  };
+  const mMatch = s.match(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?\b/);
+  if (mMatch) {
+    const mNum = String(months[mMatch[1]]).padStart(2, '0');
+    const dNum = String(mMatch[2]).padStart(2, '0');
+    const yNum = mMatch[3] ? mMatch[3] : String(yr);
+    const timeStr = isEndOfDay ? '23:59:59' : '00:00:00';
+    return new Date(`${yNum}-${mNum}-${dNum}T${timeStr}${tzOffset}`);
+  }
+
+  return null;
+}
+
 function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset = 'Z' }) {
   const now = new Date();
   let sinceDate = null;
@@ -35,7 +113,7 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
     if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
       sinceDate = new Date(`${s}T00:00:00${tzOffset}`);
     } else {
-      sinceDate = new Date(s);
+      sinceDate = parseNaturalDate(s, now, tzOffset, false) || new Date(s);
     }
   }
 
@@ -45,7 +123,7 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
     if (/^\d{4}-\d{2}-\d{2}$/.test(u)) {
       untilDate = new Date(`${u}T23:59:59${tzOffset}`);
     } else {
-      untilDate = new Date(u);
+      untilDate = parseNaturalDate(u, now, tzOffset, true) || new Date(u);
     }
   }
 
@@ -69,16 +147,8 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
       s = e;
       e = tmp;
     }
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-      sinceDate = new Date(`${s}T00:00:00${tzOffset}`);
-    } else {
-      sinceDate = new Date(s);
-    }
-    if (/^\d{4}-\d{2}-\d{2}$/.test(e)) {
-      untilDate = new Date(`${e}T23:59:59${tzOffset}`);
-    } else {
-      untilDate = new Date(e);
-    }
+    sinceDate = parseNaturalDate(s, now, tzOffset, false) || (/^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(`${s}T00:00:00${tzOffset}`) : new Date(s));
+    untilDate = parseNaturalDate(e, now, tzOffset, true) || (/^\d{4}-\d{2}-\d{2}$/.test(e) ? new Date(`${e}T23:59:59${tzOffset}`) : new Date(e));
     resolvedLabel = resolvedLabel || `${s} to ${e}`;
   }
 
@@ -90,9 +160,47 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
     resolvedLabel = d;
   }
 
-  // 6. Natural language relative timeframe strings
+  // 6. Natural language relative timeframe and holiday ranges
   const tf = (timeframe || (date && !/^\d{4}-\d{2}-\d{2}$/.test(String(date)) && !String(date).includes('..') ? String(date) : '')).toLowerCase().trim();
   if (tf && !sinceDate) {
+    // 6A. Bounded ranges: 'between [A] and [B]', 'from [A] to [B]', '[A] to [B]'
+    const betweenMatch = tf.match(/\b(?:between|from)\s+(.+?)\s+(?:and|to|through|thru)\s+(.+)/i) ||
+                         tf.match(/^(.+?)\s*(?:\.\.|\s+to\s+|\s*[-–—]\s*|\s+through\s+)\s*(.+)$/i);
+    if (betweenMatch) {
+      const p1 = parseNaturalDate(betweenMatch[1], now, tzOffset, false);
+      const p2 = parseNaturalDate(betweenMatch[2], now, tzOffset, true);
+      if (p1 && p2) {
+        sinceDate = p1;
+        untilDate = p2;
+        resolvedLabel = `${betweenMatch[1].trim()} to ${betweenMatch[2].trim()}`;
+      }
+    }
+
+    // 6B. Directional: 'since [A]', 'after [A]', 'starting from [A]'
+    const sinceMatch = tf.match(/\b(?:since|after|starting\s+(?:from\s+)?)\s*(.+)/i);
+    if (sinceMatch && !sinceDate) {
+      const p = parseNaturalDate(sinceMatch[1], now, tzOffset, false);
+      if (p) {
+        sinceDate = p;
+        untilDate = untilDate || now;
+        resolvedLabel = `since ${sinceMatch[1].trim()}`;
+      }
+    }
+
+    // 6C. Standalone holiday: e.g. 'christmas', 'christmas 2025', 'new years'
+    if (!sinceDate) {
+      const isHolidayQuery = tf.includes('christmas') || tf.includes('xmas') || tf.includes('new year') || tf.includes('halloween') || tf.includes('thanksgiving');
+      if (isHolidayQuery) {
+        const holidayStart = parseNaturalDate(tf, now, tzOffset, false);
+        const holidayEnd = parseNaturalDate(tf, now, tzOffset, true);
+        if (holidayStart && holidayEnd) {
+          sinceDate = holidayStart;
+          untilDate = holidayEnd;
+          resolvedLabel = tf;
+        }
+      }
+    }
+
     const wordToNum = {
       one: 1, a: 1, an: 1, two: 2, three: 3, four: 4, five: 5,
       six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
@@ -113,53 +221,55 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
     const dayCount = extractUnitCount('days?');
     const yearCount = extractUnitCount('years?');
 
-    if (tf.includes('today')) {
-      const startOfDay = new Date(now);
-      startOfDay.setHours(0, 0, 0, 0);
-      sinceDate = startOfDay;
-      untilDate = untilDate || now;
-      resolvedLabel = 'today';
-    } else if (tf.includes('yesterday')) {
-      const startOfYesterday = new Date(now);
-      startOfYesterday.setDate(startOfYesterday.getDate() - 1);
-      startOfYesterday.setHours(0, 0, 0, 0);
-      const endOfYesterday = new Date(startOfYesterday);
-      endOfYesterday.setHours(23, 59, 59, 999);
-      sinceDate = startOfYesterday;
-      untilDate = endOfYesterday;
-      resolvedLabel = 'yesterday';
-    } else if (tf.includes('this week') || tf.includes('current week')) {
-      const startOfWeek = new Date(now);
-      const day = startOfWeek.getDay();
-      startOfWeek.setDate(startOfWeek.getDate() - day);
-      startOfWeek.setHours(0, 0, 0, 0);
-      sinceDate = startOfWeek;
-      untilDate = untilDate || now;
-      resolvedLabel = 'this week';
-    } else if (monthCount !== null) {
-      const d = new Date(now);
-      d.setMonth(d.getMonth() - monthCount);
-      sinceDate = d;
-      untilDate = untilDate || now;
-      resolvedLabel = monthCount === 1 ? 'past month' : `past ${monthCount} months`;
-    } else if (weekCount !== null) {
-      sinceDate = new Date(now.getTime() - weekCount * 7 * 24 * 60 * 60 * 1000);
-      untilDate = untilDate || now;
-      resolvedLabel = weekCount === 1 ? 'last week' : `last ${weekCount} weeks`;
-    } else if (dayCount !== null) {
-      sinceDate = new Date(now.getTime() - dayCount * 24 * 60 * 60 * 1000);
-      untilDate = untilDate || now;
-      resolvedLabel = dayCount === 1 ? 'past day' : `past ${dayCount} days`;
-    } else if (yearCount !== null) {
-      const d = new Date(now);
-      d.setFullYear(d.getFullYear() - yearCount);
-      sinceDate = d;
-      untilDate = untilDate || now;
-      resolvedLabel = yearCount === 1 ? 'past year' : `past ${yearCount} years`;
-    } else if (tf.includes('fortnight')) {
-      sinceDate = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
-      untilDate = untilDate || now;
-      resolvedLabel = 'last two weeks';
+    if (!sinceDate) {
+      if (tf === 'today' || tf === 'now') {
+        const startOfDay = new Date(now);
+        startOfDay.setHours(0, 0, 0, 0);
+        sinceDate = startOfDay;
+        untilDate = untilDate || now;
+        resolvedLabel = 'today';
+      } else if (tf === 'yesterday') {
+        const startOfYesterday = new Date(now);
+        startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+        startOfYesterday.setHours(0, 0, 0, 0);
+        const endOfYesterday = new Date(startOfYesterday);
+        endOfYesterday.setHours(23, 59, 59, 999);
+        sinceDate = startOfYesterday;
+        untilDate = endOfYesterday;
+        resolvedLabel = 'yesterday';
+      } else if (tf === 'this week' || tf === 'current week') {
+        const startOfWeek = new Date(now);
+        const day = startOfWeek.getDay();
+        startOfWeek.setDate(startOfWeek.getDate() - day);
+        startOfWeek.setHours(0, 0, 0, 0);
+        sinceDate = startOfWeek;
+        untilDate = untilDate || now;
+        resolvedLabel = 'this week';
+      } else if (monthCount !== null) {
+        const d = new Date(now);
+        d.setMonth(d.getMonth() - monthCount);
+        sinceDate = d;
+        untilDate = untilDate || now;
+        resolvedLabel = monthCount === 1 ? 'past month' : `past ${monthCount} months`;
+      } else if (weekCount !== null) {
+        sinceDate = new Date(now.getTime() - weekCount * 7 * 24 * 60 * 60 * 1000);
+        untilDate = untilDate || now;
+        resolvedLabel = weekCount === 1 ? 'last week' : `last ${weekCount} weeks`;
+      } else if (dayCount !== null) {
+        sinceDate = new Date(now.getTime() - dayCount * 24 * 60 * 60 * 1000);
+        untilDate = untilDate || now;
+        resolvedLabel = dayCount === 1 ? 'past day' : `past ${dayCount} days`;
+      } else if (yearCount !== null) {
+        const d = new Date(now);
+        d.setFullYear(d.getFullYear() - yearCount);
+        sinceDate = d;
+        untilDate = untilDate || now;
+        resolvedLabel = yearCount === 1 ? 'past year' : `past ${yearCount} years`;
+      } else if (tf.includes('fortnight')) {
+        sinceDate = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+        untilDate = untilDate || now;
+        resolvedLabel = 'last two weeks';
+      }
     }
   }
 

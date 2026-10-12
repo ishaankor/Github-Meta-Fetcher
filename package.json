@@ -1,14 +1,16 @@
 {
-  "name": "github-meta-fetcher",
+  "name": "personal-meta-fetcher",
   "version": "1.0.0",
   "type": "module",
-  "description": "Standalone Vercel Serverless Backend API for live GitHub profile, repository, and commit data streaming",
-  "main": "api/github.js",
+  "description": "Standalone Vercel Serverless Backend API for live GitHub profile activity and real-time Spotify telemetry streaming",
+  "main": "api/index.js",
   "scripts": {
     "dev": "vercel dev",
     "start": "node api/index.js"
   },
   "keywords": [
+    "telemetry",
+    "spotify",
     "github",
     "api",
     "proxy",
