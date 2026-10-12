@@ -1358,7 +1358,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ ...memoryCache, cached: false });
   } catch (error) {
-    console.error('Vercel GitHub Meta Fetcher Handler Error:', error);
+    console.error('Personal Meta Fetcher GitHub Handler Error:', error);
 
     const fallbackResponse = memoryCache || {
       status: 'degraded',
