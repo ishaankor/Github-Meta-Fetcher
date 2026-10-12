@@ -107,6 +107,17 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
   let untilDate = null;
   let resolvedLabel = timeframe || '';
 
+  const rawValues = [timeframe, date, since, until].filter(Boolean).map(v => String(v).trim().toLowerCase());
+  const isLifetime = rawValues.some(v => v === 'all' || v === 'lifetime' || v === 'all-time' || v === 'alltime');
+  if (isLifetime) {
+    return {
+      sinceDate: null,
+      untilDate: null,
+      resolvedLabel: 'all-time',
+      isLifetime: true,
+    };
+  }
+
   // 1. Explicit 'since' timestamp or date string
   if (since) {
     const s = String(since).trim();
@@ -284,7 +295,8 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
   return {
     sinceDate: sinceDate && !isNaN(sinceDate.getTime()) ? sinceDate.toISOString() : null,
     untilDate: untilDate && !isNaN(untilDate.getTime()) ? untilDate.toISOString() : null,
-    resolvedLabel: resolvedLabel || 'specified timeframe'
+    resolvedLabel: resolvedLabel || 'specified timeframe',
+    isLifetime: false,
   };
 }
 
@@ -351,186 +363,11 @@ export default async function handler(req, res) {
       tzOffset: tzOffset || 'Z'
     });
 
-    // 1A. Repository commits over a timeframe / date range
-    if (tfWindow.sinceDate) {
-      const cacheKey = `${cleanRepo}_tf_${tfWindow.sinceDate}_${tfWindow.untilDate || 'now'}`.toLowerCase();
-      const cachedEntry = timeframeRepoCache.get(cacheKey);
+    // 1. Comprehensive repository commits lookup (timeframe, date range, or all-time)
+    const cacheKey = `${cleanRepo}_commits_${tfWindow.sinceDate || (tfWindow.isLifetime ? 'all' : 'all')}_${tfWindow.untilDate || 'now'}_${orderQuery}_${limitQuery}`.toLowerCase();
+    const cachedEntry = timeframeRepoCache.get(cacheKey) || repoCache.get(cacheKey);
 
-      if (cachedEntry && (now - cachedEntry.time < TIMEFRAME_REPO_CACHE_DURATION_MS)) {
-        return res.status(200).json({
-          ...cachedEntry.data,
-          cached: true,
-          servedAt: new Date().toISOString(),
-        });
-      }
-
-      try {
-        let fetchUrl = `https://api.github.com/repos/${username}/${cleanRepo}/commits?since=${encodeURIComponent(tfWindow.sinceDate)}&per_page=100`;
-        if (tfWindow.untilDate) {
-          fetchUrl += `&until=${encodeURIComponent(tfWindow.untilDate)}`;
-        }
-
-        const commitsRes = await fetch(fetchUrl, { headers, cache: 'no-store' });
-        if (!commitsRes.ok) {
-          const errText = await commitsRes.text();
-          return res.status(commitsRes.status).json({
-            status: 'error',
-            repository: cleanRepo,
-            error: `GitHub commits API returned status ${commitsRes.status}`,
-            details: errText,
-            servedAt: new Date().toISOString(),
-          });
-        }
-
-        const rawCommits = await commitsRes.json();
-        const filteredCommits = Array.isArray(rawCommits)
-          ? rawCommits.filter((c) => {
-              const author = (c.commit?.author?.name || c.author?.login || '').toLowerCase();
-              const msg = (c.commit?.message || '').toLowerCase();
-              const isBot = author.includes('bot') || author.includes('action');
-              const isWf = msg.includes('loc.csv') || msg.includes('[skip ci]') || msg.includes('auto-update');
-              return !isBot && !isWf;
-            })
-          : [];
-
-        // For top commits (up to 50), fetch detailed line diff stats
-        const DETAILED_LIMIT = 50;
-        const commitsToDetail = filteredCommits.slice(0, DETAILED_LIMIT);
-        const remainingCommits = filteredCommits.slice(DETAILED_LIMIT);
-
-        const detailedCommits = await Promise.all(
-          commitsToDetail.map(async (c) => {
-            const sha = c.sha;
-            const shortSha = sha ? sha.substring(0, 7) : '';
-            const commitMsg = c.commit?.message?.split('\n')[0] || 'Update repository';
-            const commitDate = c.commit?.committer?.date || c.commit?.author?.date;
-            const commitUrl = c.html_url || `https://github.com/${username}/${cleanRepo}/commit/${sha}`;
-            
-            let stats = { total: 0, additions: 0, deletions: 0 };
-            let files = [];
-
-            try {
-              const detailRes = await fetch(
-                `https://api.github.com/repos/${username}/${cleanRepo}/commits/${sha}`,
-                { headers, cache: 'no-store' }
-              );
-              if (detailRes.ok) {
-                const detail = await detailRes.json();
-                stats = detail.stats || stats;
-                files = (detail.files || []).map((f) => ({
-                  filename: f.filename,
-                  status: f.status,
-                  additions: f.additions || 0,
-                  deletions: f.deletions || 0,
-                  changes: f.changes || 0,
-                }));
-              }
-            } catch (err) {
-              console.error(`Detail fetch error for commit ${sha}:`, err);
-            }
-
-            return {
-              sha,
-              shortSha,
-              message: commitMsg,
-              repoName: cleanRepo,
-              repoFullName: `${username}/${cleanRepo}`,
-              repoUrl: `https://github.com/${username}/${cleanRepo}`,
-              commitUrl,
-              date: commitDate,
-              timeAgo: formatTimeAgo(commitDate),
-              stats,
-              linesChanged: stats.total || 0,
-              additions: stats.additions || 0,
-              deletions: stats.deletions || 0,
-              filesCount: files.length,
-              files: files.slice(0, 8),
-              author: {
-                name: c.commit?.author?.name || c.author?.login || username,
-                date: commitDate,
-              },
-            };
-          })
-        );
-
-        const unDetailedList = remainingCommits.map((c) => {
-          const sha = c.sha;
-          const shortSha = sha ? sha.substring(0, 7) : '';
-          const commitMsg = c.commit?.message?.split('\n')[0] || 'Update repository';
-          const commitDate = c.commit?.committer?.date || c.commit?.author?.date;
-          return {
-            sha,
-            shortSha,
-            message: commitMsg,
-            repoName: cleanRepo,
-            repoFullName: `${username}/${cleanRepo}`,
-            repoUrl: `https://github.com/${username}/${cleanRepo}`,
-            commitUrl: c.html_url || `https://github.com/${username}/${cleanRepo}/commit/${sha}`,
-            date: commitDate,
-            timeAgo: formatTimeAgo(commitDate),
-            stats: { total: 0, additions: 0, deletions: 0 },
-            linesChanged: 0,
-            additions: 0,
-            deletions: 0,
-            filesCount: 0,
-            files: [],
-            author: {
-              name: c.commit?.author?.name || c.author?.login || username,
-              date: commitDate,
-            },
-          };
-        });
-
-        const allCommitsList = [...detailedCommits, ...unDetailedList];
-        const totalAdditions = detailedCommits.reduce((acc, c) => acc + (c.additions || 0), 0);
-        const totalDeletions = detailedCommits.reduce((acc, c) => acc + (c.deletions || 0), 0);
-        const totalLinesChanged = detailedCommits.reduce((acc, c) => acc + (c.linesChanged || 0), 0);
-
-        const sincePretty = tfWindow.sinceDate.split('T')[0];
-        const untilPretty = (tfWindow.untilDate || new Date().toISOString()).split('T')[0];
-
-        let directSummary = '';
-        if (filteredCommits.length > 0) {
-          directSummary = `Ishaan made ${filteredCommits.length} commit(s) on ${cleanRepo} during ${tfWindow.resolvedLabel} (${sincePretty} to ${untilPretty}), totaling ${totalLinesChanged.toLocaleString()} lines of code changed (+${totalAdditions.toLocaleString()}/-${totalDeletions.toLocaleString()}).`;
-        } else {
-          directSummary = `Ishaan didn't log any commits for ${cleanRepo} during ${tfWindow.resolvedLabel} (${sincePretty} to ${untilPretty}).`;
-        }
-
-        const responseData = {
-          status: 'online',
-          repository: cleanRepo,
-          timeframe: tfWindow.resolvedLabel,
-          since: tfWindow.sinceDate,
-          until: tfWindow.untilDate,
-          totalCommits: filteredCommits.length,
-          commits: allCommitsList,
-          totalLinesChanged,
-          totalAdditions,
-          totalDeletions,
-          directSummary,
-          metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
-          metaPagePromotion: "Explore Ishaan's live Meta telemetry dashboard at https://portfolio.ishaankoradia.com/meta for interactive Codebase Evolution (LOC charts), Developer Habits Matrix, and repository constellation.",
-          servedAt: new Date().toISOString(),
-        };
-
-        timeframeRepoCache.set(cacheKey, { data: responseData, time: now });
-        return res.status(200).json(responseData);
-      } catch (err) {
-        console.error(`Repository timeframe commit error (${cleanRepo}):`, err);
-        return res.status(500).json({
-          status: 'error',
-          repository: cleanRepo,
-          error: err.message,
-          servedAt: new Date().toISOString(),
-        });
-      }
-    }
-
-    // 1B. Standard single repository latest commit lookup
-    const cacheKey = cleanRepo.toLowerCase();
-    const cachedEntry = repoCache.get(cacheKey);
-
-    if (cachedEntry && (now - cachedEntry.time < REPO_CACHE_DURATION_MS)) {
+    if (cachedEntry && (now - cachedEntry.time < TIMEFRAME_REPO_CACHE_DURATION_MS)) {
       return res.status(200).json({
         ...cachedEntry.data,
         cached: true,
@@ -539,27 +376,64 @@ export default async function handler(req, res) {
     }
 
     try {
-      const resRepoCommits = await fetch(
-        `https://api.github.com/repos/${username}/${cleanRepo}/commits?per_page=10`,
-        { headers, cache: 'no-store' }
-      );
-      if (resRepoCommits.ok) {
-        const repoCommits = await resRepoCommits.json();
-        if (Array.isArray(repoCommits) && repoCommits.length > 0) {
-          const chosen = repoCommits.find((c) => {
+      let fetchUrl = `https://api.github.com/repos/${username}/${cleanRepo}/commits?per_page=100`;
+      if (tfWindow.sinceDate) {
+        fetchUrl += `&since=${encodeURIComponent(tfWindow.sinceDate)}`;
+      }
+      if (tfWindow.untilDate) {
+        fetchUrl += `&until=${encodeURIComponent(tfWindow.untilDate)}`;
+      }
+
+      const commitsRes = await fetch(fetchUrl, { headers, cache: 'no-store' });
+      if (!commitsRes.ok) {
+        if (commitsRes.status === 404) {
+          return res.status(404).json({
+            status: 'not_found',
+            repository: cleanRepo,
+            message: `No commits found for repository ${cleanRepo}`,
+            servedAt: new Date().toISOString(),
+          });
+        }
+        const errText = await commitsRes.text();
+        return res.status(commitsRes.status).json({
+          status: 'error',
+          repository: cleanRepo,
+          error: `GitHub commits API returned status ${commitsRes.status}`,
+          details: errText,
+          servedAt: new Date().toISOString(),
+        });
+      }
+
+      const rawCommits = await commitsRes.json();
+      const filteredCommits = Array.isArray(rawCommits)
+        ? rawCommits.filter((c) => {
             const author = (c.commit?.author?.name || c.author?.login || '').toLowerCase();
             const msg = (c.commit?.message || '').toLowerCase();
             const isBot = author.includes('bot') || author.includes('action');
             const isWf = msg.includes('loc.csv') || msg.includes('[skip ci]') || msg.includes('auto-update');
             return !isBot && !isWf;
-          }) || repoCommits[0];
+          })
+        : [];
 
+      // For top commits (up to 50), fetch detailed line diff stats
+      const DETAILED_LIMIT = 50;
+      const commitsToDetail = filteredCommits.slice(0, DETAILED_LIMIT);
+      const remainingCommits = filteredCommits.slice(DETAILED_LIMIT);
+
+      const detailedCommits = await Promise.all(
+        commitsToDetail.map(async (c) => {
+          const sha = c.sha;
+          const shortSha = sha ? sha.substring(0, 7) : '';
+          const commitMsg = c.commit?.message?.split('\n')[0] || 'Update repository';
+          const commitDate = c.commit?.committer?.date || c.commit?.author?.date;
+          const commitUrl = c.html_url || `https://github.com/${username}/${cleanRepo}/commit/${sha}`;
+          
           let stats = { total: 0, additions: 0, deletions: 0 };
           let files = [];
 
           try {
             const detailRes = await fetch(
-              `https://api.github.com/repos/${username}/${cleanRepo}/commits/${chosen.sha}`,
+              `https://api.github.com/repos/${username}/${cleanRepo}/commits/${sha}`,
               { headers, cache: 'no-store' }
             );
             if (detailRes.ok) {
@@ -573,19 +447,18 @@ export default async function handler(req, res) {
                 changes: f.changes || 0,
               }));
             }
-          } catch (e) {
-            console.error(`Detail fetch error for ${chosen.sha}:`, e);
+          } catch (err) {
+            console.error(`Detail fetch error for commit ${sha}:`, err);
           }
 
-          const commitDate = chosen.commit?.committer?.date || chosen.commit?.author?.date;
-          const repoCommit = {
-            sha: chosen.sha,
-            shortSha: chosen.sha.substring(0, 7),
-            message: chosen.commit?.message?.split('\n')[0] || 'Update repository',
+          return {
+            sha,
+            shortSha,
+            message: commitMsg,
             repoName: cleanRepo,
             repoFullName: `${username}/${cleanRepo}`,
             repoUrl: `https://github.com/${username}/${cleanRepo}`,
-            commitUrl: chosen.html_url || `https://github.com/${username}/${cleanRepo}/commit/${chosen.sha}`,
+            commitUrl,
             date: commitDate,
             timeAgo: formatTimeAgo(commitDate),
             stats,
@@ -593,54 +466,115 @@ export default async function handler(req, res) {
             additions: stats.additions || 0,
             deletions: stats.deletions || 0,
             filesCount: files.length,
-            files: files.slice(0, 10),
+            files: files.slice(0, 8),
             author: {
-              name: chosen.commit?.author?.name || username,
+              name: c.commit?.author?.name || c.author?.login || username,
               date: commitDate,
             },
           };
+        })
+      );
 
-          let architectureContext = "";
-          if (cleanRepo.toLowerCase().includes("data-science-portfolio")) {
-            architectureContext = (
-              "Ishaan structures his empirical research and Exploratory Data Analysis (EDA) projects " +
-              "(such as his surgery statistics and childhood obesity analyses) across dedicated modular repositories " +
-              "rather than a single monolithic data science repo, tracking their specific data notebooks and D3/Pandas pipelines independently. " +
-              "Meanwhile, 'my-data-science-portfolio' (https://github.com/ishaankor/my-data-science-portfolio) hosts his interactive 3D WebGL portfolio platform " +
-              "and live Codebase Evolution suite at https://portfolio.ishaankoradia.com."
-            );
-          }
-
-          const responseData = {
-            status: 'online',
-            repository: cleanRepo,
-            architectureContext,
-            repoCommit,
-            linesChanged: repoCommit.linesChanged,
-            additions: repoCommit.additions,
-            deletions: repoCommit.deletions,
-            filesCount: repoCommit.filesCount,
-            metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
-            metaPagePromotion: "Explore Ishaan's live Meta telemetry dashboard at https://portfolio.ishaankoradia.com/meta for interactive Codebase Evolution (LOC charts), Developer Habits Matrix, and repository constellation.",
-            servedAt: new Date().toISOString(),
-          };
-
-          repoCache.set(cacheKey, { data: responseData, time: now });
-          return res.status(200).json(responseData);
-        }
-      }
-      return res.status(404).json({
-        status: 'not_found',
-        repository: cleanRepo,
-        message: `No commits found for repository ${cleanRepo}`,
-        servedAt: new Date().toISOString(),
+      const unDetailedList = remainingCommits.map((c) => {
+        const sha = c.sha;
+        const shortSha = sha ? sha.substring(0, 7) : '';
+        const commitMsg = c.commit?.message?.split('\n')[0] || 'Update repository';
+        const commitDate = c.commit?.committer?.date || c.commit?.author?.date;
+        return {
+          sha,
+          shortSha,
+          message: commitMsg,
+          repoName: cleanRepo,
+          repoFullName: `${username}/${cleanRepo}`,
+          repoUrl: `https://github.com/${username}/${cleanRepo}`,
+          commitUrl: c.html_url || `https://github.com/${username}/${cleanRepo}/commit/${sha}`,
+          date: commitDate,
+          timeAgo: formatTimeAgo(commitDate),
+          stats: { total: 0, additions: 0, deletions: 0 },
+          linesChanged: 0,
+          additions: 0,
+          deletions: 0,
+          filesCount: 0,
+          files: [],
+          author: {
+            name: c.commit?.author?.name || c.author?.login || username,
+            date: commitDate,
+          },
+        };
       });
-    } catch (repoErr) {
-      console.error(`Specific repo fetch error (${repoQuery}):`, repoErr);
+
+      let allCommitsList = [...detailedCommits, ...unDetailedList];
+      if (orderQuery === 'asc') {
+        allCommitsList.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      } else {
+        allCommitsList.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      }
+
+      // Latest commit chronologically regardless of list ordering
+      const latestCommitObj = [...allCommitsList].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0] || null;
+
+      const totalAdditions = detailedCommits.reduce((acc, c) => acc + (c.additions || 0), 0);
+      const totalDeletions = detailedCommits.reduce((acc, c) => acc + (c.deletions || 0), 0);
+      const totalLinesChanged = detailedCommits.reduce((acc, c) => acc + (c.linesChanged || 0), 0);
+
+      const sincePretty = tfWindow.sinceDate ? tfWindow.sinceDate.split('T')[0] : null;
+      const untilPretty = tfWindow.untilDate ? tfWindow.untilDate.split('T')[0] : null;
+
+      let directSummary = '';
+      if (filteredCommits.length > 0) {
+        if (sincePretty && untilPretty) {
+          directSummary = `Ishaan made ${filteredCommits.length} commit(s) on ${cleanRepo} during ${tfWindow.resolvedLabel} (${sincePretty} to ${untilPretty}), totaling ${totalLinesChanged.toLocaleString()} lines of code changed (+${totalAdditions.toLocaleString()}/-${totalDeletions.toLocaleString()}).`;
+        } else {
+          directSummary = `Ishaan has recorded ${filteredCommits.length} commit(s) on ${cleanRepo}, totaling ${totalLinesChanged.toLocaleString()} lines of code changed (+${totalAdditions.toLocaleString()}/-${totalDeletions.toLocaleString()}).`;
+        }
+      } else {
+        directSummary = `Ishaan didn't log any commits for ${cleanRepo}${tfWindow.resolvedLabel ? ` during ${tfWindow.resolvedLabel}` : ''}.`;
+      }
+
+      let architectureContext = "";
+      if (cleanRepo.toLowerCase().includes("data-science-portfolio")) {
+        architectureContext = (
+          "Ishaan structures his empirical research and Exploratory Data Analysis (EDA) projects " +
+          "(such as his surgery statistics and childhood obesity analyses) across dedicated modular repositories " +
+          "rather than a single monolithic data science repo, tracking their specific data notebooks and D3/Pandas pipelines independently. " +
+          "Meanwhile, 'my-data-science-portfolio' (https://github.com/ishaankor/my-data-science-portfolio) hosts his interactive 3D WebGL portfolio platform " +
+          "and live Codebase Evolution suite at https://portfolio.ishaankoradia.com."
+        );
+      }
+
+      const responseData = {
+        status: 'online',
+        repository: cleanRepo,
+        architectureContext,
+        timeframe: tfWindow.resolvedLabel || (sincePretty ? `${sincePretty} to ${untilPretty}` : 'all-time'),
+        since: tfWindow.sinceDate,
+        until: tfWindow.untilDate,
+        totalCommits: filteredCommits.length,
+        commits: allCommitsList.slice(0, limitQuery || 100),
+        latestCommit: latestCommitObj,
+        repoCommit: latestCommitObj, // Backwards-compatible alias
+        linesChanged: latestCommitObj ? latestCommitObj.linesChanged : totalLinesChanged,
+        additions: latestCommitObj ? latestCommitObj.additions : totalAdditions,
+        deletions: latestCommitObj ? latestCommitObj.deletions : totalDeletions,
+        filesCount: latestCommitObj ? latestCommitObj.filesCount : (allCommitsList[0]?.filesCount || 0),
+        totalLinesChanged,
+        totalAdditions,
+        totalDeletions,
+        directSummary,
+        metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
+        metaPagePromotion: "Explore Ishaan's live Meta telemetry dashboard at https://portfolio.ishaankoradia.com/meta for interactive Codebase Evolution (LOC charts), Developer Habits Matrix, and repository constellation.",
+        servedAt: new Date().toISOString(),
+      };
+
+      timeframeRepoCache.set(cacheKey, { data: responseData, time: now });
+      repoCache.set(cleanRepo.toLowerCase(), { data: responseData, time: now });
+      return res.status(200).json(responseData);
+    } catch (err) {
+      console.error(`Repository commit fetch error (${cleanRepo}):`, err);
       return res.status(500).json({
         status: 'error',
         repository: cleanRepo,
-        error: repoErr.message,
+        error: err.message,
         servedAt: new Date().toISOString(),
       });
     }
