@@ -1,6 +1,6 @@
 let memoryCache = null;
 let lastFetchTime = 0;
-const CACHE_DURATION_MS = 120 * 1000;
+const CACHE_DURATION_MS = 60 * 1000;
 const repoCache = new Map();
 const REPO_CACHE_DURATION_MS = 120 * 1000;
 const dateCache = new Map();
@@ -312,7 +312,7 @@ const KNOWN_EARLIEST_COMMIT = {
 };
 
 export default async function handler(req, res) {
-  res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
+  res.setHeader('Cache-Control', 'public, s-maxage=30, stale-while-revalidate=60');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
