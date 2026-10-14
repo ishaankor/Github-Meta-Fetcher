@@ -318,7 +318,7 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization, Cache-Control, Pragma'
+    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization'
   );
 
   if (req.method === 'OPTIONS') {
@@ -1155,8 +1155,10 @@ export default async function handler(req, res) {
       }
     }
 
-    // 2. Fallback: Query individual repository commit endpoints filtered by user author
-    if (commitsData.length === 0 && Array.isArray(reposData) && reposData.length > 0) {
+    // 2. Always query the most recently pushed repositories directly. The Events API is
+    // delayed (up to hours), omits private repos, and no longer ships PushEvent commit
+    // lists, so relying on it alone freezes the stream on stale commits.
+    if (Array.isArray(reposData) && reposData.length > 0) {
       const topPushed = [...reposData]
         .sort((a, b) => new Date(b.pushed_at).getTime() - new Date(a.pushed_at).getTime())
         .slice(0, 5);
@@ -1206,6 +1208,7 @@ export default async function handler(req, res) {
 
       if (allFetchedCommits.length > 0) {
         const commitMap = new Map();
+        commitsData.forEach((item) => commitMap.set(item.sha, item));
         allFetchedCommits.forEach((item) => commitMap.set(item.sha, item));
 
         commitsData = Array.from(commitMap.values())
