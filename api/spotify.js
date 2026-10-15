@@ -49,9 +49,15 @@ export default async function handler(req, res) {
     return;
   }
 
-  const clientId = process.env.SPOTIFY_CLIENT_ID || "0aa5284095d54daeb73f6577e7d3b70f";
-  const clientSecret = process.env.SPOTIFY_CLIENT_SECRET || "0176814e681840be93a645247f3897a2";
-  const refreshToken = process.env.SPOTIFY_REFRESH_TOKEN || "AQB47kA0Y9vNZoMdRHfDE_9ij43BqWXg2MbQ9r8JMOLAvCmITpohCAF7NXz4jLv74iSNkSnOIiEmq95cRLRGPr2lqe0ix2vObFastGvaCb_0c8c0uezxKpkIbopikJtUf8o";
+  const clientId = process.env.SPOTIFY_CLIENT_ID;
+  const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+  const refreshToken = process.env.SPOTIFY_REFRESH_TOKEN;
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    return res.status(500).json({
+      error: 'Spotify credentials are missing. Please configure SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, and SPOTIFY_REFRESH_TOKEN in your environment variables.',
+    });
+  }
 
   try {
     const accessToken = await getAccessToken(clientId, clientSecret, refreshToken);
