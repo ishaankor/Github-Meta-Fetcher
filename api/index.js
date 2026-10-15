@@ -6,6 +6,7 @@ export default function handler(req, res) {
     username: process.env.GITHUB_USERNAME || 'ishaankor',
     endpoints: {
       githubData: '/api/github',
+      commitsData: '/api/commits',
       spotifyData: '/api/spotify'
     },
     documentation: 'https://github.com/ishaankor/Github-Meta-Fetcher'
