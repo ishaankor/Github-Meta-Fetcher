@@ -7,6 +7,12 @@ const dateCache = new Map();
 const DATE_CACHE_DURATION_MS = 300 * 1000;
 const timeframeRepoCache = new Map();
 const TIMEFRAME_REPO_CACHE_DURATION_MS = 300 * 1000;
+let lifetimeSearchCache = {
+  totalHistoricalCommits: 1210,
+  earliestCommit: null,
+  lastFetched: 0,
+};
+const LIFETIME_SEARCH_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour TTL for heavy GitHub search queries
 
 function formatTimeAgo(dateString) {
   const date = new Date(dateString);
@@ -318,7 +324,7 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization'
+    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization, Cache-Control, Pragma'
   );
 
   if (req.method === 'OPTIONS') {
@@ -990,44 +996,53 @@ export default async function handler(req, res) {
     }
 
     // Fetch total lifetime commits and earliest commit across entire GitHub account from start to present
-    let earliestCommit = KNOWN_EARLIEST_COMMIT;
-    try {
-      const searchHeaders = {
-        ...headers,
-        Accept: 'application/vnd.cloak-preview+json, application/vnd.github.v3+json',
-      };
-      const [lifetimeRes, earliestRes] = await Promise.all([
-        fetch(`https://api.github.com/search/commits?q=author:${username}`, { headers: searchHeaders, cache: 'no-store' }),
-        fetch(`https://api.github.com/search/commits?q=author:${username}&sort=committer-date&order=asc&per_page=1`, { headers: searchHeaders, cache: 'no-store' })
-      ]);
-      if (lifetimeRes.ok) {
-        const lifetimeJson = await lifetimeRes.json();
-        if (lifetimeJson.total_count) {
-          metaTelemetry.totalHistoricalCommits = lifetimeJson.total_count;
+    let earliestCommit = lifetimeSearchCache.earliestCommit || KNOWN_EARLIEST_COMMIT;
+    if (lifetimeSearchCache.totalHistoricalCommits) {
+      metaTelemetry.totalHistoricalCommits = lifetimeSearchCache.totalHistoricalCommits;
+    }
+
+    if (now - lifetimeSearchCache.lastFetched > LIFETIME_SEARCH_CACHE_TTL_MS) {
+      try {
+        const searchHeaders = {
+          ...headers,
+          Accept: 'application/vnd.cloak-preview+json, application/vnd.github.v3+json',
+        };
+        const [lifetimeRes, earliestRes] = await Promise.all([
+          fetch(`https://api.github.com/search/commits?q=author:${username}`, { headers: searchHeaders, cache: 'no-store' }),
+          fetch(`https://api.github.com/search/commits?q=author:${username}&sort=committer-date&order=asc&per_page=1`, { headers: searchHeaders, cache: 'no-store' })
+        ]);
+        if (lifetimeRes.ok) {
+          const lifetimeJson = await lifetimeRes.json();
+          if (lifetimeJson.total_count) {
+            metaTelemetry.totalHistoricalCommits = lifetimeJson.total_count;
+            lifetimeSearchCache.totalHistoricalCommits = lifetimeJson.total_count;
+          }
         }
-      }
-      if (earliestRes && earliestRes.ok) {
-        const earliestJson = await earliestRes.json();
-        if (earliestJson.items && earliestJson.items.length > 0) {
-          const item = earliestJson.items[0];
-          const r_full = item.repository?.full_name || `${username}/Daily-Motivation-`;
-          const r_short = item.repository?.name || r_full.split('/')[1] || r_full;
-          const c_sha = item.sha || KNOWN_EARLIEST_COMMIT.sha;
-          const c_date = item.commit?.committer?.date || item.commit?.author?.date || KNOWN_EARLIEST_COMMIT.date;
-          earliestCommit = {
-            sha: c_sha,
-            shortSha: c_sha.substring(0, 7),
-            message: item.commit?.message?.split('\n')[0] || 'Initial commit',
-            repoName: r_short,
-            repoFullName: r_full,
-            commitUrl: item.html_url || `https://github.com/${r_full}/commit/${c_sha}`,
-            date: c_date,
-            timeAgo: formatTimeAgo(c_date),
-          };
+        if (earliestRes && earliestRes.ok) {
+          const earliestJson = await earliestRes.json();
+          if (earliestJson.items && earliestJson.items.length > 0) {
+            const item = earliestJson.items[0];
+            const r_full = item.repository?.full_name || `${username}/Daily-Motivation-`;
+            const r_short = item.repository?.name || r_full.split('/')[1] || r_full;
+            const c_sha = item.sha || KNOWN_EARLIEST_COMMIT.sha;
+            const c_date = item.commit?.committer?.date || item.commit?.author?.date || KNOWN_EARLIEST_COMMIT.date;
+            earliestCommit = {
+              sha: c_sha,
+              shortSha: c_sha.substring(0, 7),
+              message: item.commit?.message?.split('\n')[0] || 'Initial commit',
+              repoName: r_short,
+              repoFullName: r_full,
+              commitUrl: item.html_url || `https://github.com/${r_full}/commit/${c_sha}`,
+              date: c_date,
+              timeAgo: formatTimeAgo(c_date),
+            };
+            lifetimeSearchCache.earliestCommit = earliestCommit;
+          }
         }
+        lifetimeSearchCache.lastFetched = now;
+      } catch (lifetimeErr) {
+        console.warn('Lifetime commits search error:', lifetimeErr);
       }
-    } catch (lifetimeErr) {
-      console.warn('Lifetime commits search error:', lifetimeErr);
     }
     metaTelemetry.earliestCommit = earliestCommit;
     metaTelemetry.firstCommit = earliestCommit;
